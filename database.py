@@ -113,16 +113,32 @@ class Database:
         """Добавление или обновление пользователя"""
         try:
             cursor = self.connection.cursor()
-            cursor.execute("""
-                INSERT OR REPLACE INTO users (user_id, username, first_name, phone) 
-                VALUES (?, ?, ?, ?)
-            """, (user_id, username, first_name, phone))
+            
+            # Проверяем, существует ли пользователь
+            cursor.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,))
+            exists = cursor.fetchone()
+            
+            if exists:
+                # Обновляем существующего пользователя
+                cursor.execute("""
+                    UPDATE users SET username = ?, first_name = ?, phone = ?
+                    WHERE user_id = ?
+                """, (username, first_name, phone, user_id))
+            else:
+                # Добавляем нового пользователя
+                cursor.execute("""
+                    INSERT INTO users (user_id, username, first_name, phone) 
+                    VALUES (?, ?, ?, ?)
+                """, (user_id, username, first_name, phone))
+            
             self.connection.commit()
+            logger.info(f"✅ Пользователь {'обновлен' if exists else 'добавлен'}: {user_id}")
             return True
         except Exception as e:
             logger.error(f"❌ Ошибка добавления пользователя: {e}")
             return False
     
+    # Остальные методы остаются без изменений...
     def add_parking_spot(self, owner_id, spot_number, price_per_hour, price_per_day):
         """Добавление парковочного места"""
         try:
