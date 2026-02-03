@@ -2,6 +2,7 @@ import sqlite3
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import List, Tuple
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -53,19 +54,23 @@ class Database:
                 price_per_day REAL NOT NULL,
                 is_active BOOLEAN DEFAULT 1,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(owner_id, spot_number),
                 FOREIGN KEY (owner_id) REFERENCES users(user_id) ON DELETE CASCADE
             )
             """,
             """
-            CREATE TABLE IF NOT EXISTS availability (
+            CREATE TABLE IF NOT EXISTS availability_periods (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 spot_id INTEGER NOT NULL,
-                date DATE NOT NULL,
-                start_time TIME NOT NULL,
-                end_time TIME NOT NULL,
-                is_available BOOLEAN DEFAULT 1,
+                start_datetime DATETIME NOT NULL,
+                end_datetime DATETIME NOT NULL,
+                is_booked BOOLEAN DEFAULT 0,
+                booked_by INTEGER,
+                booked_at TIMESTAMP,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (spot_id) REFERENCES parking_spots(id) ON DELETE CASCADE
+                FOREIGN KEY (spot_id) REFERENCES parking_spots(id) ON DELETE CASCADE,
+                FOREIGN KEY (booked_by) REFERENCES users(user_id),
+                CHECK (end_datetime > start_datetime)
             )
             """,
             """
@@ -73,14 +78,26 @@ class Database:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
                 spot_id INTEGER NOT NULL,
-                date DATE NOT NULL,
-                start_time TIME NOT NULL,
-                end_time TIME NOT NULL,
+                period_id INTEGER,
+                start_datetime DATETIME NOT NULL,
+                end_datetime DATETIME NOT NULL,
                 total_price REAL NOT NULL,
-                status TEXT DEFAULT 'pending',
-                booked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                status TEXT DEFAULT 'active',
+                payment_status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(user_id),
-                FOREIGN KEY (spot_id) REFERENCES parking_spots(id)
+                FOREIGN KEY (spot_id) REFERENCES parking_spots(id),
+                FOREIGN KEY (period_id) REFERENCES availability_periods(id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                message TEXT NOT NULL,
+                is_read BOOLEAN DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
             """
         ]
@@ -89,12 +106,36 @@ class Database:
             cursor = self.connection.cursor()
             for query in queries:
                 cursor.execute(query)
+            
+            # Создание индексов для ускорения запросов
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_periods_datetime 
+                ON availability_periods(start_datetime, end_datetime, is_booked)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_periods_spot 
+                ON availability_periods(spot_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_bookings_user 
+                ON bookings(user_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_bookings_datetime 
+                ON bookings(start_datetime, end_datetime)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_spots_owner 
+                ON parking_spots(owner_id, is_active)
+            """)
+            
             self.connection.commit()
             return True
         except Exception as e:
             logger.error(f"Ошибка создания таблиц: {e}")
             return False
     
+    # ============ USER METHODS ============
     def add_user(self, user_id, username, first_name, phone):
         try:
             cursor = self.connection.cursor()
@@ -107,6 +148,16 @@ class Database:
         except Exception as e:
             logger.error(f"Ошибка добавления пользователя: {e}")
             return False
+    
+    def get_user(self, user_id):
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"Ошибка получения пользователя: {e}")
+            return None
     
     def check_user_exists(self, user_id):
         try:
@@ -137,6 +188,7 @@ class Database:
             logger.error(f"Ошибка назначения администратора: {e}")
             return False
     
+    # ============ PARKING SPOT METHODS ============
     def add_parking_spot(self, owner_id, spot_number, price_per_hour, price_per_day):
         try:
             cursor = self.connection.cursor()
@@ -146,67 +198,180 @@ class Database:
             """, (owner_id, spot_number, price_per_hour, price_per_day))
             self.connection.commit()
             return cursor.lastrowid
+        except sqlite3.IntegrityError:
+            return None
         except Exception as e:
             logger.error(f"Ошибка добавления парковочного места: {e}")
             return None
     
-    def add_availability(self, spot_id, date, start_time, end_time):
+    def get_parking_spot(self, spot_id):
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
-                INSERT INTO availability (spot_id, date, start_time, end_time)
-                VALUES (?, ?, ?, ?)
-            """, (spot_id, date, start_time, end_time))
-            self.connection.commit()
-            return True
-        except Exception as e:
-            logger.error(f"Ошибка добавления доступности: {e}")
-            return False
-    
-    def get_available_spots(self, date):
-        try:
-            cursor = self.connection.cursor()
-            cursor.execute("""
-                SELECT ps.*, a.date, a.start_time, a.end_time,
-                       u.username, u.first_name
+                SELECT ps.*, u.username, u.first_name, u.phone
                 FROM parking_spots ps
-                JOIN availability a ON ps.id = a.spot_id
                 LEFT JOIN users u ON ps.owner_id = u.user_id
-                WHERE a.date = ? AND a.is_available = 1 AND ps.is_active = 1
+                WHERE ps.id = ?
+            """, (spot_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"Ошибка получения места: {e}")
+            return None
+    
+    def get_user_spots(self, owner_id):
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                SELECT ps.*, 
+                       COUNT(DISTINCT ap.id) as total_periods,
+                       SUM(CASE WHEN ap.is_booked = 1 THEN 1 ELSE 0 END) as booked_periods,
+                       (SELECT COUNT(*) FROM bookings b 
+                        WHERE b.spot_id = ps.id AND b.status = 'active') as active_bookings
+                FROM parking_spots ps
+                LEFT JOIN availability_periods ap ON ps.id = ap.spot_id
+                WHERE ps.owner_id = ? AND ps.is_active = 1
+                GROUP BY ps.id
                 ORDER BY ps.spot_number
-            """, (date,))
+            """, (owner_id,))
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
         except Exception as e:
-            logger.error(f"Ошибка получения доступных мест: {e}")
+            logger.error(f"Ошибка получения мест пользователя: {e}")
             return []
     
-    def create_booking(self, user_id, spot_id, date, start_time, end_time, total_price):
+    # ============ AVAILABILITY PERIODS METHODS ============
+    def add_availability_period(self, spot_id, start_datetime, end_datetime):
+        """Добавляет период доступности (может быть на несколько дней)"""
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                INSERT INTO availability_periods (spot_id, start_datetime, end_datetime)
+                VALUES (?, ?, ?)
+            """, (spot_id, start_datetime, end_datetime))
+            self.connection.commit()
+            return cursor.lastrowid
+        except Exception as e:
+            logger.error(f"Ошибка добавления периода доступности: {e}")
+            return None
+    
+    def check_period_availability(self, spot_id, start_datetime, end_datetime):
+        """Проверяет, свободен ли период (нет пересечений с забронированными периодами)"""
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                SELECT COUNT(*) as count 
+                FROM availability_periods
+                WHERE spot_id = ? 
+                  AND is_booked = 0
+                  AND NOT (end_datetime <= ? OR start_datetime >= ?)
+            """, (spot_id, start_datetime, end_datetime))
+            
+            result = cursor.fetchone()
+            return result['count'] == 0 if result else False
+        except Exception as e:
+            logger.error(f"Ошибка проверки доступности периода: {e}")
+            return False
+    
+    def get_available_periods_for_spot(self, spot_id, start_date=None, end_date=None):
+        """Получает все свободные периоды для места (опционально в диапазоне дат)"""
         try:
             cursor = self.connection.cursor()
             
-            cursor.execute("""
-                SELECT id FROM availability 
-                WHERE spot_id = ? AND date = ? 
-                AND start_time <= ? AND end_time >= ?
-                AND is_available = 1
-            """, (spot_id, date, start_time, end_time))
+            if start_date and end_date:
+                cursor.execute("""
+                    SELECT * FROM availability_periods
+                    WHERE spot_id = ? 
+                      AND is_booked = 0
+                      AND NOT (end_datetime <= ? OR start_datetime >= ?)
+                    ORDER BY start_datetime
+                """, (spot_id, start_date, end_date))
+            else:
+                cursor.execute("""
+                    SELECT * FROM availability_periods
+                    WHERE spot_id = ? AND is_booked = 0
+                    ORDER BY start_datetime
+                """, (spot_id,))
             
-            if not cursor.fetchone():
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"Ошибка получения периодов для места: {e}")
+            return []
+    
+    def get_available_spots_by_date_range(self, start_datetime, end_datetime):
+        """Получает все места, доступные в указанный период времени"""
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                SELECT DISTINCT ps.*, u.username, u.first_name,
+                       ap.start_datetime, ap.end_datetime
+                FROM parking_spots ps
+                LEFT JOIN users u ON ps.owner_id = u.user_id
+                LEFT JOIN availability_periods ap ON ps.id = ap.spot_id
+                WHERE ps.is_active = 1 
+                  AND ap.is_booked = 0
+                  AND ap.start_datetime <= ?
+                  AND ap.end_datetime >= ?
+                GROUP BY ps.id
+                ORDER BY ps.spot_number
+            """, (end_datetime, start_datetime))
+            
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"Ошибка получения мест по диапазону дат: {e}")
+            return []
+    
+    def find_available_periods(self, spot_id, start_datetime, end_datetime):
+        """Находит подходящие свободные периоды для бронирования"""
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                SELECT * FROM availability_periods
+                WHERE spot_id = ? 
+                  AND is_booked = 0
+                  AND start_datetime <= ?
+                  AND end_datetime >= ?
+                ORDER BY start_datetime
+            """, (spot_id, start_datetime, end_datetime))
+            
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"Ошибка поиска периодов: {e}")
+            return []
+    
+    # ============ BOOKING METHODS ============
+    def create_booking(self, user_id, spot_id, period_id, start_datetime, end_datetime, total_price):
+        """Создает бронирование и помечает период как занятый"""
+        try:
+            cursor = self.connection.cursor()
+            
+            # Проверяем, что период все еще свободен
+            cursor.execute("""
+                SELECT id FROM availability_periods
+                WHERE id = ? AND is_booked = 0
+            """, (period_id,))
+            
+            period = cursor.fetchone()
+            if not period:
                 return None
             
+            # Создаем бронирование
             cursor.execute("""
-                INSERT INTO bookings (user_id, spot_id, date, start_time, end_time, total_price)
+                INSERT INTO bookings (user_id, spot_id, period_id, start_datetime, end_datetime, total_price)
                 VALUES (?, ?, ?, ?, ?, ?)
-            """, (user_id, spot_id, date, start_time, end_time, total_price))
+            """, (user_id, spot_id, period_id, start_datetime, end_datetime, total_price))
             
             booking_id = cursor.lastrowid
             
+            # Помечаем период как занятый
             cursor.execute("""
-                UPDATE availability SET is_available = 0
-                WHERE spot_id = ? AND date = ?
-                AND start_time <= ? AND end_time >= ?
-            """, (spot_id, date, start_time, end_time))
+                UPDATE availability_periods 
+                SET is_booked = 1, booked_by = ?, booked_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (user_id, period_id))
             
             self.connection.commit()
             return booking_id
@@ -215,47 +380,118 @@ class Database:
             self.connection.rollback()
             return None
     
-    def get_user_spots(self, owner_id):
+    def get_user_bookings(self, user_id, include_cancelled=False):
         try:
             cursor = self.connection.cursor()
-            cursor.execute("""
-                SELECT ps.*, 
-                       (SELECT COUNT(*) FROM availability a WHERE a.spot_id = ps.id) as total_days,
-                       (SELECT COUNT(*) FROM bookings b WHERE b.spot_id = ps.id AND b.status = 'confirmed') as total_bookings
-                FROM parking_spots ps
-                WHERE ps.owner_id = ?
-            """, (owner_id,))
+            if include_cancelled:
+                cursor.execute("""
+                    SELECT b.*, ps.spot_number, ps.price_per_hour, ps.price_per_day,
+                           u.username as owner_username, u.first_name as owner_name
+                    FROM bookings b
+                    JOIN parking_spots ps ON b.spot_id = ps.id
+                    JOIN users u ON ps.owner_id = u.user_id
+                    WHERE b.user_id = ?
+                    ORDER BY b.start_datetime DESC
+                """, (user_id,))
+            else:
+                cursor.execute("""
+                    SELECT b.*, ps.spot_number, ps.price_per_hour, ps.price_per_day,
+                           u.username as owner_username, u.first_name as owner_name
+                    FROM bookings b
+                    JOIN parking_spots ps ON b.spot_id = ps.id
+                    JOIN users u ON ps.owner_id = u.user_id
+                    WHERE b.user_id = ? AND b.status = 'active'
+                    ORDER BY b.start_datetime DESC
+                """, (user_id,))
+            
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
         except Exception as e:
-            logger.error(f"Ошибка получения мест пользователя: {e}")
+            logger.error(f"Ошибка получения бронирований пользователя: {e}")
             return []
     
-    def get_user_bookings(self, user_id):
+    def cancel_booking(self, booking_id):
+        try:
+            cursor = self.connection.cursor()
+            
+            # Получаем информацию о бронировании
+            cursor.execute("""
+                SELECT period_id FROM bookings WHERE id = ?
+            """, (booking_id,))
+            booking = cursor.fetchone()
+            
+            if not booking:
+                return False
+            
+            # Отменяем бронирование
+            cursor.execute("""
+                UPDATE bookings SET status = 'cancelled' WHERE id = ?
+            """, (booking_id,))
+            
+            # Освобождаем период
+            cursor.execute("""
+                UPDATE availability_periods 
+                SET is_booked = 0, booked_by = NULL, booked_at = NULL
+                WHERE id = ?
+            """, (booking['period_id'],))
+            
+            self.connection.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка отмены бронирования: {e}")
+            self.connection.rollback()
+            return False
+    
+    # ============ NOTIFICATION METHODS ============
+    def add_notification(self, user_id, message):
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
-                SELECT b.*, ps.spot_number, ps.price_per_hour, ps.price_per_day,
-                       u.username as owner_username, u.first_name as owner_name
-                FROM bookings b
-                JOIN parking_spots ps ON b.spot_id = ps.id
-                JOIN users u ON ps.owner_id = u.user_id
-                WHERE b.user_id = ?
-                ORDER BY b.date DESC, b.start_time DESC
+                INSERT INTO notifications (user_id, message)
+                VALUES (?, ?)
+            """, (user_id, message))
+            self.connection.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка добавления уведомления: {e}")
+            return False
+    
+    def get_unread_notifications(self, user_id):
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                SELECT * FROM notifications
+                WHERE user_id = ? AND is_read = 0
+                ORDER BY created_at DESC
             """, (user_id,))
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
         except Exception as e:
-            logger.error(f"Ошибка получения бронирований: {e}")
+            logger.error(f"Ошибка получения уведомлений: {e}")
             return []
     
+    def mark_notifications_as_read(self, user_id):
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                UPDATE notifications SET is_read = 1
+                WHERE user_id = ? AND is_read = 0
+            """, (user_id,))
+            self.connection.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка пометки уведомлений как прочитанных: {e}")
+            return False
+    
+    # ============ ADMIN METHODS ============
     def get_all_users(self):
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
                 SELECT u.*, 
                        COUNT(DISTINCT ps.id) as total_spots,
-                       COUNT(DISTINCT b.id) as total_bookings
+                       COUNT(DISTINCT b.id) as total_bookings,
+                       SUM(CASE WHEN b.status = 'active' THEN b.total_price ELSE 0 END) as total_spent
                 FROM users u
                 LEFT JOIN parking_spots ps ON u.user_id = ps.owner_id
                 LEFT JOIN bookings b ON u.user_id = b.user_id
@@ -274,11 +510,12 @@ class Database:
             cursor.execute("""
                 SELECT ps.*, 
                        u.username, u.first_name, u.phone,
-                       COUNT(DISTINCT a.id) as total_availability,
+                       COUNT(DISTINCT ap.id) as total_periods,
+                       SUM(CASE WHEN ap.is_booked = 1 THEN 1 ELSE 0 END) as booked_periods,
                        COUNT(DISTINCT b.id) as total_bookings
                 FROM parking_spots ps
                 LEFT JOIN users u ON ps.owner_id = u.user_id
-                LEFT JOIN availability a ON ps.id = a.spot_id
+                LEFT JOIN availability_periods ap ON ps.id = ap.spot_id
                 LEFT JOIN bookings b ON ps.id = b.spot_id
                 GROUP BY ps.id
                 ORDER BY ps.created_at DESC
@@ -289,21 +526,21 @@ class Database:
             logger.error(f"Ошибка получения всех мест: {e}")
             return []
     
-    def get_all_bookings(self, limit=30):
+    def get_all_bookings(self, days=30):
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
                 SELECT b.*, 
                        ps.spot_number,
                        u.username as user_username, u.first_name as user_name, u.phone as user_phone,
-                       owner.username as owner_username, owner.first_name as owner_name
+                       owner.username as owner_username, owner.first_name as owner_name, owner.phone as owner_phone
                 FROM bookings b
                 JOIN parking_spots ps ON b.spot_id = ps.id
                 JOIN users u ON b.user_id = u.user_id
                 JOIN users owner ON ps.owner_id = owner.user_id
-                ORDER BY b.booked_at DESC
-                LIMIT ?
-            """, (limit,))
+                WHERE b.created_at >= DATE('now', ?)
+                ORDER BY b.created_at DESC
+            """, (f'-{days} days',))
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
         except Exception as e:
@@ -324,11 +561,17 @@ class Database:
             cursor.execute("SELECT COUNT(*) as count FROM bookings")
             stats['total_bookings'] = cursor.fetchone()['count']
             
-            cursor.execute("SELECT COUNT(*) as count FROM bookings WHERE status = 'pending'")
-            stats['pending_bookings'] = cursor.fetchone()['count']
+            cursor.execute("SELECT COUNT(*) as count FROM bookings WHERE status = 'active' AND start_datetime >= DATETIME('now')")
+            stats['active_bookings'] = cursor.fetchone()['count']
             
-            cursor.execute("SELECT SUM(total_price) as total FROM bookings WHERE status = 'confirmed'")
+            cursor.execute("SELECT SUM(total_price) as total FROM bookings WHERE status = 'active'")
             stats['total_income'] = cursor.fetchone()['total'] or 0
+            
+            cursor.execute("SELECT COUNT(*) as count FROM availability_periods WHERE is_booked = 0")
+            stats['available_periods'] = cursor.fetchone()['count']
+            
+            cursor.execute("SELECT COUNT(*) as count FROM availability_periods WHERE is_booked = 1")
+            stats['booked_periods'] = cursor.fetchone()['count']
             
             return stats
         except Exception as e:
