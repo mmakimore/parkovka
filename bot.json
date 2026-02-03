@@ -1,0 +1,6 @@
+{
+  "bot_name": "ParkingBot",
+  "entry_point": "bot.py",
+  "dependencies_file": "requirements.txt",
+  "python_version": "3.9"
+}
