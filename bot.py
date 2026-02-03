@@ -8,15 +8,15 @@ from datetime import datetime, timedelta
 from config import BOT_TOKEN, ADMIN_CHAT_ID, ADMIN_PASSWORD
 from database import Database
 
-# Initialize bot and dispatcher
+# Инициализация бота
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
 
-# Initialize database
+# Инициализация базы данных
 db = Database()
 
-# States
+# Состояния бота
 class UserRegistration(StatesGroup):
     waiting_for_name = State()
     waiting_for_phone = State()
@@ -37,34 +37,38 @@ class BookParkingSpot(StatesGroup):
 class AdminPanel(StatesGroup):
     waiting_for_password = State()
 
-# Helper functions
+# Вспомогательные функции
 def get_next_days():
-    """Get next 4 days including today"""
+    """Получение ближайших 4 дней"""
     today = datetime.now().date()
     return [today + timedelta(days=i) for i in range(4)]
 
 def format_date(date):
-    """Format date to string"""
+    """Форматирование даты в строку"""
     return date.strftime("%d.%m.%Y")
 
-# Start command
+# Команда /start
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
     
-    # Check if user exists
-    if not db.is_admin(user_id):  # Simple check if user exists
-        await message.answer("👋 Добро пожаловать! Для начала зарегистрируйтесь.")
+    # Проверяем существование пользователя
+    if not db.check_user_exists(user_id):
+        # Берем username автоматически
+        username = message.from_user.username or "не указан"
+        
+        # Запрашиваем имя
+        await message.answer(f"👋 Добро пожаловать! Ваш username: @{username}")
         await message.answer("📝 Введите ваше имя:")
         await UserRegistration.waiting_for_name.set()
     else:
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        markup.add("🚗 Добавить парковочное место")
-        markup.add("📅 Забронировать место")
+        # Показываем главное меню
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+        markup.add("🚗 Добавить парковочное место", "📅 Забронировать место")
         markup.add("📊 Мои места", "📋 Мои бронирования")
         await message.answer("🎉 С возвращением! Что вы хотите сделать?", reply_markup=markup)
 
-# Registration process
+# Регистрация пользователя
 @dp.message_handler(state=UserRegistration.waiting_for_name)
 async def process_name(message: types.Message, state: FSMContext):
     await state.update_data(name=message.text)
@@ -75,46 +79,46 @@ async def process_name(message: types.Message, state: FSMContext):
 async def process_phone(message: types.Message, state: FSMContext):
     phone = message.text
     user_data = await state.get_data()
+    user = message.from_user
     
-    # Save user to database
+    # Сохраняем пользователя в БД
     success = db.add_user(
-        user_id=message.from_user.id,
-        username=message.from_user.username,
+        user_id=user.id,
+        username=user.username,
         first_name=user_data['name'],
         phone=phone
     )
     
     if success:
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        markup.add("🚗 Добавить парковочное место")
-        markup.add("📅 Забронировать место")
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+        markup.add("🚗 Добавить парковочное место", "📅 Забронировать место")
         markup.add("📊 Мои места", "📋 Мои бронирования")
         
         await message.answer("✅ Регистрация завершена!", reply_markup=markup)
         
-        # Notify admin
+        # Уведомление админу
         await bot.send_message(
             ADMIN_CHAT_ID,
-            f"👤 Новый пользователь зарегистрировался:\n"
+            f"👤 Новый пользователь зарегистрирован:\n"
             f"Имя: {user_data['name']}\n"
             f"Телефон: {phone}\n"
-            f"Username: @{message.from_user.username}"
+            f"Username: @{user.username}"
         )
     else:
         await message.answer("❌ Ошибка при регистрации. Попробуйте еще раз.")
     
     await state.finish()
 
-# Add parking spot
+# Добавление парковочного места
 @dp.message_handler(lambda message: message.text == "🚗 Добавить парковочное место")
 async def cmd_add_spot(message: types.Message):
-    await message.answer("🚗 Введите номер парковочного места:")
+    await message.answer("🚗 Введите номер парковочного места (например, A-15):")
     await AddParkingSpot.waiting_for_spot_number.set()
 
 @dp.message_handler(state=AddParkingSpot.waiting_for_spot_number)
 async def process_spot_number(message: types.Message, state: FSMContext):
     await state.update_data(spot_number=message.text)
-    await message.answer("💰 Введите цену за час (например: 100):")
+    await message.answer("💰 Введите цену за час в рублях (например: 100):")
     await AddParkingSpot.waiting_for_price_hour.set()
 
 @dp.message_handler(state=AddParkingSpot.waiting_for_price_hour)
@@ -122,7 +126,7 @@ async def process_price_hour(message: types.Message, state: FSMContext):
     try:
         price = float(message.text)
         await state.update_data(price_hour=price)
-        await message.answer("💰 Введите цену за сутки (например: 800):")
+        await message.answer("💰 Введите цену за сутки в рублях (например: 800):")
         await AddParkingSpot.waiting_for_price_day.set()
     except:
         await message.answer("❌ Введите корректную сумму (только цифры):")
@@ -133,11 +137,11 @@ async def process_price_day(message: types.Message, state: FSMContext):
         price = float(message.text)
         await state.update_data(price_day=price)
         
-        # Show date selection
+        # Показываем ближайшие 4 дня
         days = get_next_days()
-        markup = types.InlineKeyboardMarkup()
+        markup = types.InlineKeyboardMarkup(row_width=2)
         for day in days:
-            markup.add(types.InlineKeyboardButton(
+            markup.insert(types.InlineKeyboardButton(
                 format_date(day),
                 callback_data=f"add_date_{day}"
             ))
@@ -170,7 +174,7 @@ async def process_time_range(message: types.Message, state: FSMContext):
         
         user_data = await state.get_data()
         
-        # Add parking spot to database
+        # Добавляем парковочное место
         spot_id = db.add_parking_spot(
             owner_id=message.from_user.id,
             spot_number=user_data['spot_number'],
@@ -179,7 +183,7 @@ async def process_time_range(message: types.Message, state: FSMContext):
         )
         
         if spot_id:
-            # Add availability
+            # Добавляем доступность
             db.add_availability(
                 spot_id=spot_id,
                 date=user_data['selected_date'],
@@ -187,7 +191,7 @@ async def process_time_range(message: types.Message, state: FSMContext):
                 end_time=end_time
             )
             
-            # Notify admin
+            # Уведомление админу
             await bot.send_message(
                 ADMIN_CHAT_ID,
                 f"🅿️ Новое парковочное место добавлено!\n"
@@ -200,26 +204,29 @@ async def process_time_range(message: types.Message, state: FSMContext):
             )
             
             await message.answer(
-                f"✅ Парковочное место успешно добавлено!\n"
-                f"Номер: {user_data['spot_number']}\n"
-                f"Дата: {format_date(user_data['selected_date'])}\n"
-                f"Время: {time_range}"
+                f"✅ Парковочное место успешно добавлено!\n\n"
+                f"📌 Номер места: {user_data['spot_number']}\n"
+                f"📅 Дата: {format_date(user_data['selected_date'])}\n"
+                f"🕐 Время: {time_range}\n"
+                f"💰 Цена/час: {user_data['price_hour']} руб.\n"
+                f"💰 Цена/сутки: {user_data['price_day']} руб."
             )
         else:
             await message.answer("❌ Ошибка при добавлении места.")
         
         await state.finish()
-    except:
+    except Exception as e:
+        logging.error(f"Ошибка: {e}")
         await message.answer("❌ Неверный формат времени. Используйте ЧЧ.ММ-ЧЧ.ММ")
 
-# Book parking spot
+# Бронирование места
 @dp.message_handler(lambda message: message.text == "📅 Забронировать место")
 async def cmd_book_spot(message: types.Message):
-    # Show date selection
+    # Показываем ближайшие 4 дня
     days = get_next_days()
-    markup = types.InlineKeyboardMarkup()
+    markup = types.InlineKeyboardMarkup(row_width=2)
     for day in days:
-        markup.add(types.InlineKeyboardButton(
+        markup.insert(types.InlineKeyboardButton(
             format_date(day),
             callback_data=f"book_date_{day}"
         ))
@@ -234,21 +241,21 @@ async def process_book_date(callback_query: types.CallbackQuery, state: FSMConte
     
     await state.update_data(selected_date=selected_date)
     
-    # Get available spots for selected date
+    # Получаем доступные места на выбранную дату
     spots = db.get_available_spots(selected_date)
     
     if not spots:
         await bot.send_message(
             callback_query.from_user.id,
-            "❌ На эту дату нет доступных мест."
+            f"❌ На {format_date(selected_date)} нет доступных мест."
         )
         await state.finish()
         return
     
-    markup = types.InlineKeyboardMarkup()
+    markup = types.InlineKeyboardMarkup(row_width=1)
     for spot in spots:
         markup.add(types.InlineKeyboardButton(
-            f"Место {spot['spot_number']} - {spot['price_per_hour']} руб./час",
+            f"📍 Место {spot['spot_number']} - {spot['price_per_hour']} руб./час",
             callback_data=f"select_spot_{spot['id']}"
         ))
     
@@ -281,35 +288,41 @@ async def process_book_time(message: types.Message, state: FSMContext):
         
         user_data = await state.get_data()
         
-        # Calculate price (simplified - assuming hourly rate)
-        # You might want to implement more complex pricing logic
+        # Получаем информацию о месте для расчета цены
+        spots = db.get_available_spots(user_data['selected_date'])
+        selected_spot = next((s for s in spots if s['id'] == user_data['selected_spot_id']), None)
+        
+        if not selected_spot:
+            await message.answer("❌ Место больше не доступно.")
+            await state.finish()
+            return
+        
+        # Расчет стоимости (упрощенный - по часам)
         hours = (datetime.combine(datetime.today(), end_time) - 
                  datetime.combine(datetime.today(), start_time)).seconds / 3600
-        
-        # Get spot price
-        spots = db.get_available_spots(user_data['selected_date'])
-        spot_price = next((s['price_per_hour'] for s in spots if s['id'] == user_data['selected_spot_id']), 0)
-        
-        total_price = hours * spot_price
+        total_price = hours * selected_spot['price_per_hour']
         
         await state.update_data(
             start_time=start_time,
             end_time=end_time,
             total_price=total_price,
-            time_range=time_range
+            time_range=time_range,
+            spot_number=selected_spot['spot_number']
         )
         
-        markup = types.InlineKeyboardMarkup()
+        markup = types.InlineKeyboardMarkup(row_width=2)
         markup.add(
             types.InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_booking"),
-            types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_booking")
+            types.InlineKeyboardButton("❌ Отменить", callback_data="cancel_booking")
         )
         
         await message.answer(
-            f"📋 Подтвердите бронирование:\n"
-            f"Дата: {format_date(user_data['selected_date'])}\n"
-            f"Время: {time_range}\n"
-            f"Стоимость: {total_price:.2f} руб.\n\n"
+            f"📋 Подтвердите бронирование:\n\n"
+            f"📍 Место: {selected_spot['spot_number']}\n"
+            f"📅 Дата: {format_date(user_data['selected_date'])}\n"
+            f"🕐 Время: {time_range}\n"
+            f"⏱️ Часов: {hours:.1f}\n"
+            f"💰 Стоимость: {total_price:.2f} руб.\n\n"
             f"Подтвердить бронирование?",
             reply_markup=markup
         )
@@ -321,7 +334,7 @@ async def process_book_time(message: types.Message, state: FSMContext):
 async def confirm_booking(callback_query: types.CallbackQuery, state: FSMContext):
     user_data = await state.get_data()
     
-    # Create booking
+    # Создаем бронирование
     booking_id = db.create_booking(
         user_id=callback_query.from_user.id,
         spot_id=user_data['selected_spot_id'],
@@ -332,21 +345,25 @@ async def confirm_booking(callback_query: types.CallbackQuery, state: FSMContext
     )
     
     if booking_id:
-        # Notify admin
+        # Уведомление админу
         await bot.send_message(
             ADMIN_CHAT_ID,
-            f"📅 Новая бронь!\n"
-            f"Пользователь: @{callback_query.from_user.username}\n"
-            f"Дата: {format_date(user_data['selected_date'])}\n"
-            f"Время: {user_data['time_range']}\n"
-            f"Сумма: {user_data['total_price']:.2f} руб."
+            f"📅 НОВАЯ БРОНЬ!\n\n"
+            f"👤 Пользователь: @{callback_query.from_user.username}\n"
+            f"📍 Место: {user_data['spot_number']}\n"
+            f"📅 Дата: {format_date(user_data['selected_date'])}\n"
+            f"🕐 Время: {user_data['time_range']}\n"
+            f"💰 Сумма: {user_data['total_price']:.2f} руб."
         )
         
         await bot.send_message(
             callback_query.from_user.id,
-            f"✅ Бронирование подтверждено!\n"
-            f"Номер брони: #{booking_id}\n"
-            f"Сумма к оплате: {user_data['total_price']:.2f} руб."
+            f"✅ Бронирование подтверждено!\n\n"
+            f"📌 Номер брони: #{booking_id}\n"
+            f"📍 Место: {user_data['spot_number']}\n"
+            f"📅 Дата: {format_date(user_data['selected_date'])}\n"
+            f"🕐 Время: {user_data['time_range']}\n"
+            f"💰 Сумма к оплате: {user_data['total_price']:.2f} руб."
         )
     else:
         await bot.send_message(
@@ -361,28 +378,28 @@ async def cancel_booking(callback_query: types.CallbackQuery, state: FSMContext)
     await bot.send_message(callback_query.from_user.id, "❌ Бронирование отменено.")
     await state.finish()
 
-# My spots
+# Мои места
 @dp.message_handler(lambda message: message.text == "📊 Мои места")
 async def cmd_my_spots(message: types.Message):
     spots = db.get_user_spots(message.from_user.id)
     
     if not spots:
-        await message.answer("У вас пока нет добавленных мест.")
+        await message.answer("У вас пока нет добавленных парковочных мест.")
         return
     
     response = "📊 Ваши парковочные места:\n\n"
     for spot in spots:
         response += (
-            f"📍 Место {spot['spot_number']}\n"
-            f"Цена/час: {spot['price_per_hour']} руб.\n"
-            f"Цена/сутки: {spot['price_per_day']} руб.\n"
-            f"Броней: {spot['total_bookings']}\n"
+            f"📍 Место: {spot['spot_number']}\n"
+            f"💰 Цена/час: {spot['price_per_hour']} руб.\n"
+            f"💰 Цена/сутки: {spot['price_per_day']} руб.\n"
+            f"📅 Добавлено: {spot['created_at'][:10]}\n"
             f"────────────────────\n"
         )
     
     await message.answer(response)
 
-# My bookings
+# Мои бронирования
 @dp.message_handler(lambda message: message.text == "📋 Мои бронирования")
 async def cmd_my_bookings(message: types.Message):
     bookings = db.get_user_bookings(message.from_user.id)
@@ -394,18 +411,18 @@ async def cmd_my_bookings(message: types.Message):
     response = "📋 Ваши бронирования:\n\n"
     for booking in bookings:
         response += (
-            f"Бронь #{booking['id']}\n"
-            f"Место: {booking['spot_number']}\n"
-            f"Дата: {booking['date'].strftime('%d.%m.%Y')}\n"
-            f"Время: {booking['start_time']} - {booking['end_time']}\n"
-            f"Сумма: {booking['total_price']} руб.\n"
-            f"Статус: {booking['status']}\n"
+            f"📌 Бронь #{booking['id']}\n"
+            f"📍 Место: {booking['spot_number']}\n"
+            f"📅 Дата: {booking['date']}\n"
+            f"🕐 Время: {booking['start_time'][:5]} - {booking['end_time'][:5]}\n"
+            f"💰 Сумма: {booking['total_price']} руб.\n"
+            f"📊 Статус: {booking['status']}\n"
             f"────────────────────\n"
         )
     
     await message.answer(response)
 
-# Admin panel
+# Админ панель
 @dp.message_handler(commands=['admin'])
 async def cmd_admin(message: types.Message):
     await message.answer("🔐 Введите пароль для доступа к админ-панели:")
@@ -416,33 +433,65 @@ async def process_admin_password(message: types.Message, state: FSMContext):
     if message.text == ADMIN_PASSWORD:
         db.set_admin(message.from_user.id)
         
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        markup.add("👥 Все пользователи")
-        markup.add("🅿️ Все места")
-        markup.add("📊 Статистика")
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+        markup.add("👥 Все пользователи", "🅿️ Все места")
+        markup.add("📅 Все бронирования", "📊 Статистика")
         markup.add("🔙 Главное меню")
         
         await message.answer("✅ Доступ к админ-панели предоставлен!", reply_markup=markup)
     else:
         await message.answer("❌ Неверный пароль!")
-    
-    await state.finish()
+        await state.finish()
 
-# Main menu
+# Админ функции
+@dp.message_handler(lambda message: message.text == "👥 Все пользователи")
+async def admin_all_users(message: types.Message):
+    if not db.is_admin(message.from_user.id):
+        await message.answer("⛔ У вас нет доступа!")
+        return
+    
+    # Простая заглушка - можно расширить
+    await message.answer("Функция просмотра всех пользователей будет реализована позже.")
+
+@dp.message_handler(lambda message: message.text == "🅿️ Все места")
+async def admin_all_spots(message: types.Message):
+    if not db.is_admin(message.from_user.id):
+        await message.answer("⛔ У вас нет доступа!")
+        return
+    
+    await message.answer("Функция просмотра всех мест будет реализована позже.")
+
+@dp.message_handler(lambda message: message.text == "📅 Все бронирования")
+async def admin_all_bookings(message: types.Message):
+    if not db.is_admin(message.from_user.id):
+        await message.answer("⛔ У вас нет доступа!")
+        return
+    
+    await message.answer("Функция просмотра всех бронирований будет реализована позже.")
+
+@dp.message_handler(lambda message: message.text == "📊 Статистика")
+async def admin_statistics(message: types.Message):
+    if not db.is_admin(message.from_user.id):
+        await message.answer("⛔ У вас нет доступа!")
+        return
+    
+    await message.answer("Функция статистики будет реализована позже.")
+
+# Главное меню
 @dp.message_handler(lambda message: message.text == "🔙 Главное меню")
 async def cmd_main_menu(message: types.Message):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("🚗 Добавить парковочное место")
-    markup.add("📅 Забронировать место")
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add("🚗 Добавить парковочное место", "📅 Забронировать место")
     markup.add("📊 Мои места", "📋 Мои бронирования")
     await message.answer("🏠 Главное меню", reply_markup=markup)
 
-# Error handler
+# Обработчик ошибок
 @dp.errors_handler()
 async def errors_handler(update, exception):
     logging.error(f"Update {update} caused error {exception}")
     return True
 
+# Запуск бота
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     executor.start_polling(dp, skip_updates=True)
