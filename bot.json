@@ -1,5 +1,5 @@
 {
-  "bot_name": "ParkingBot",
+  "bot_name": "ParkingBotMultiDay",
   "entry_point": "bot.py",
   "dependencies_file": "requirements.txt",
   "python_version": "3.9",
