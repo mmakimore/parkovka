@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 import re
 import asyncio
 
-from config import BOT_TOKEN, ADMIN_CHAT_IDS, ADMIN_PASSWORD
+from config import BOT_TOKEN, ADMIN_CHAT_ID, ADMIN_PASSWORD
 from database import Database
 
 # Настройка логирования
@@ -326,7 +326,7 @@ async def show_main_menu(message: types.Message):
 async def process_name(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
         await state.finish()
-        await message.answer("❌ Регистрация отменена")
+        await message.answer("❌ Регистрация отменена", reply_markup=get_main_keyboard(message.from_user.id))
         await show_main_menu(message)
         return
     
@@ -343,7 +343,7 @@ async def process_name(message: types.Message, state: FSMContext):
 async def process_phone(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
         await state.finish()
-        await message.answer("❌ Регистрация отменена")
+        await message.answer("❌ Регистрация отменена", reply_markup=get_main_keyboard(message.from_user.id))
         await show_main_menu(message)
         return
     
@@ -376,19 +376,17 @@ async def process_phone(message: types.Message, state: FSMContext):
     )
     
     if success:
-        # Отправляем уведомление всем админам
-        for admin_id in ADMIN_CHAT_IDS:
-            try:
-                await bot.send_message(
-                    admin_id,
-                    f"👤 <b>Новый пользователь</b>\n"
-                    f"Имя: {user_data['name']}\n"
-                    f"Телефон: {phone}\n"
-                    f"Username: @{user.username if user.username else 'нет'}\n"
-                    f"ID: {user.id}"
-                )
-            except Exception as e:
-                logger.error(f"Ошибка отправки уведомления админу {admin_id}: {e}")
+        try:
+            await bot.send_message(
+                ADMIN_CHAT_ID,
+                f"👤 <b>Новый пользователь</b>\n"
+                f"Имя: {user_data['name']}\n"
+                f"Телефон: {phone}\n"
+                f"Username: @{user.username if user.username else 'нет'}\n"
+                f"ID: {user.id}"
+            )
+        except Exception as e:
+            logger.error(f"Ошибка отправки уведомления админу: {e}")
         
         await message.answer(f"✅ <b>Регистрация завершена!</b>\n\n"
                           f"👤 <b>Ваши данные:</b>\n"
@@ -417,7 +415,7 @@ async def cmd_add_spot(message: types.Message):
 async def process_spot_number(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
         await state.finish()
-        await message.answer("❌ Добавление места отменено")
+        await message.answer("❌ Добавление места отменено", reply_markup=get_main_keyboard(message.from_user.id))
         await show_main_menu(message)
         return
     
@@ -445,7 +443,7 @@ async def process_spot_number(message: types.Message, state: FSMContext):
 async def process_price_hour(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
         await state.finish()
-        await message.answer("❌ Добавление места отменено")
+        await message.answer("❌ Добавление места отменено", reply_markup=get_main_keyboard(message.from_user.id))
         await show_main_menu(message)
         return
     
@@ -472,7 +470,7 @@ async def process_price_hour(message: types.Message, state: FSMContext):
 async def process_price_day(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
         await state.finish()
-        await message.answer("❌ Добавление места отменено")
+        await message.answer("❌ Добавление места отменено", reply_markup=get_main_keyboard(message.from_user.id))
         await show_main_menu(message)
         return
     
@@ -497,7 +495,6 @@ async def process_price_day(message: types.Message, state: FSMContext):
                           "Выберите дату начала или введите свою в формате ДД.ММ.ГГГГ:\n"
                           "Например: 21.02.2026")
         
-        # Отправляем инлайн-клавиатуру отдельным сообщением
         await message.answer("Или выберите дату из списка:", reply_markup=get_date_selection_keyboard("add_start"))
         await AddParkingSpot.waiting_for_start_date.set()
     except ValueError:
@@ -548,7 +545,7 @@ async def process_start_date(callback_query: types.CallbackQuery, state: FSMCont
 async def process_start_date_custom(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
         await state.finish()
-        await message.answer("❌ Добавление места отменено")
+        await message.answer("❌ Добавление места отменено", reply_markup=get_main_keyboard(message.from_user.id))
         await show_main_menu(message)
         return
     
@@ -628,7 +625,7 @@ async def process_start_time(callback_query: types.CallbackQuery, state: FSMCont
 async def process_start_time_custom(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
         await state.finish()
-        await message.answer("❌ Добавление места отменено")
+        await message.answer("❌ Добавление места отменено", reply_markup=get_main_keyboard(message.from_user.id))
         await show_main_menu(message)
         return
     
@@ -705,7 +702,7 @@ async def process_end_date(callback_query: types.CallbackQuery, state: FSMContex
 async def process_end_date_custom(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
         await state.finish()
-        await message.answer("❌ Добавление места отменено")
+        await message.answer("❌ Добавление места отменено", reply_markup=get_main_keyboard(message.from_user.id))
         await show_main_menu(message)
         return
     
@@ -819,7 +816,7 @@ async def process_end_time(callback_query: types.CallbackQuery, state: FSMContex
 async def process_end_time_custom(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
         await state.finish()
-        await message.answer("❌ Добавление места отменено")
+        await message.answer("❌ Добавление места отменено", reply_markup=get_main_keyboard(message.from_user.id))
         await show_main_menu(message)
         return
     
@@ -927,20 +924,14 @@ async def confirm_add_spot_final(callback_query: types.CallbackQuery, state: FSM
     
     try:
         user = callback_query.from_user
-        # Отправляем уведомление ВСЕМ админам
-        for admin_id in ADMIN_CHAT_IDS:
-            try:
-                await bot.send_message(
-                    admin_id,
-                    f"🅿️ <b>Добавлено новое место</b>\n"
-                    f"Место: {user_data['spot_number']}\n"
-                    f"Владелец: @{user.username if user.username else 'нет'} (ID: {user.id})\n"
-                    f"Цена/час: {user_data['price_hour']} руб.\n"
-                    f"Цена/сутки: {user_data['price_day']} руб.\n"
-                    f"Период: {format_datetime(start_datetime)} - {format_datetime(end_datetime)}"
-                )
-            except Exception as e:
-                logger.error(f"Ошибка отправки уведомления админу {admin_id}: {e}")
+        await bot.send_message(
+            ADMIN_CHAT_ID,
+            f"🅿️ <b>Добавлено новое место</b>\n"
+            f"Место: {user_data['spot_number']}\n"
+            f"Владелец: @{user.username if user.username else 'нет'}\n"
+            f"Цена/час: {user_data['price_hour']} руб.\n"
+            f"Период: {format_datetime(start_datetime)} - {format_datetime(end_datetime)}"
+        )
     except Exception as e:
         logger.error(f"Ошибка отправки уведомления админу: {e}")
     
@@ -1069,7 +1060,7 @@ async def process_free_spots_period(callback_query: types.CallbackQuery, state: 
 async def process_custom_free_period(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
         await state.finish()
-        await message.answer("❌ Поиск отменен")
+        await message.answer("❌ Поиск отменен", reply_markup=get_main_keyboard(message.from_user.id))
         await show_main_menu(message)
         return
     
@@ -1201,7 +1192,7 @@ async def process_book_start_date(callback_query: types.CallbackQuery, state: FS
 async def process_book_start_date_custom(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
         await state.finish()
-        await message.answer("❌ Поиск места отменен")
+        await message.answer("❌ Поиск места отменен", reply_markup=get_main_keyboard(message.from_user.id))
         await show_main_menu(message)
         return
     
@@ -1280,7 +1271,7 @@ async def process_book_start_time(callback_query: types.CallbackQuery, state: FS
 async def process_book_start_time_custom(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
         await state.finish()
-        await message.answer("❌ Поиск места отменен")
+        await message.answer("❌ Поиск места отменен", reply_markup=get_main_keyboard(message.from_user.id))
         await show_main_menu(message)
         return
     
@@ -1301,7 +1292,7 @@ async def process_book_start_time_custom(message: types.Message, state: FSMConte
     await message.answer(f"📅 <b>Укажите дату окончания аренды</b>\n\n"
                       f"Начало: {format_date(start_date)} {format_time(time_obj)}\n\n"
                       f"Выберите дату окончания или введите свою в формате ДД.ММ.ГГГГ:\n"
-                      f"<i>Можно указать ту же дату, если аренда в пределах одного день</i>")
+                      f"<i>Можно указать ту же дату, если аренда в пределах один день</i>")
     await message.answer("Или выберите дату из списка:", reply_markup=get_date_selection_keyboard("book_end"))
     await BookParkingSpot.waiting_for_end_date.set()
 
@@ -1356,7 +1347,7 @@ async def process_book_end_date(callback_query: types.CallbackQuery, state: FSMC
 async def process_book_end_date_custom(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
         await state.finish()
-        await message.answer("❌ Поиск места отменен")
+        await message.answer("❌ Поиск места отменен", reply_markup=get_main_keyboard(message.from_user.id))
         await show_main_menu(message)
         return
     
@@ -1506,7 +1497,7 @@ async def process_book_end_time(callback_query: types.CallbackQuery, state: FSMC
 async def process_book_end_time_custom(message: types.Message, state: FSMContext):
     if message.text == "❌ Отмена":
         await state.finish()
-        await message.answer("❌ Поиск места отменен")
+        await message.answer("❌ Поиск места отменен", reply_markup=get_main_keyboard(message.from_user.id))
         await show_main_menu(message)
         return
     
@@ -1702,19 +1693,14 @@ async def confirm_booking_final(callback_query: types.CallbackQuery, state: FSMC
     
     try:
         user = callback_query.from_user
-        # Отправляем уведомление ВСЕМ админам
-        for admin_id in ADMIN_CHAT_IDS:
-            try:
-                await bot.send_message(
-                    admin_id,
-                    f"📅 <b>Новое бронирование #{booking_id}</b>\n"
-                    f"👤 Пользователь: @{user.username if user.username else 'нет'} (ID: {user.id})\n"
-                    f"Место: {user_data['spot_number']}\n"
-                    f"Период: {format_datetime(user_data['start_datetime'])} - {format_datetime(user_data['end_datetime'])}\n"
-                    f"Сумма: {user_data['total_price']:.2f} руб."
-                )
-            except Exception as e:
-                logger.error(f"Ошибка отправки уведомления админу {admin_id}: {e}")
+        await bot.send_message(
+            ADMIN_CHAT_ID,
+            f"📅 <b>Новое бронирование #{booking_id}</b>\n"
+            f"👤 Пользователь: @{user.username if user.username else 'нет'}\n"
+            f"Место: {user_data['spot_number']}\n"
+            f"Период: {format_datetime(user_data['start_datetime'])} - {format_datetime(user_data['end_datetime'])}\n"
+            f"Сумма: {user_data['total_price']:.2f} руб."
+        )
     except Exception as e:
         logger.error(f"Ошибка отправки уведомления админу: {e}")
     
@@ -1784,7 +1770,7 @@ async def cmd_my_notifications(message: types.Message):
         await message.answer("⚠️ Сначала зарегистрируйтесь через /start")
         return
     
-    await message.answer("🔔 <b>Загружаю ваши уведомления...</b>", reply_markup=get_cancel_keyboard())
+    await message.answer("🔔 <b>Загружаю ваши уведомления...</b>")
     await asyncio.sleep(0.5)
     
     notifications = db.get_user_notifications(message.from_user.id)
@@ -1902,7 +1888,7 @@ async def cmd_my_spots(message: types.Message):
         await message.answer("⚠️ Сначала зарегистрируйтесь через /start")
         return
     
-    await message.answer("📍 <b>Загружаю ваши места...</b>", reply_markup=get_cancel_keyboard())
+    await message.answer("📍 <b>Загружаю ваши места...</b>")
     await asyncio.sleep(0.5)
     
     spots = db.get_user_spots(message.from_user.id)
@@ -1950,7 +1936,7 @@ async def cmd_my_bookings(message: types.Message):
         await message.answer("⚠️ Сначала зарегистрируйтесь через /start")
         return
     
-    await message.answer("📋 <b>Загружаю ваши бронирования...</b>", reply_markup=get_cancel_keyboard())
+    await message.answer("📋 <b>Загружаю ваши бронирования...</b>")
     await asyncio.sleep(0.5)
     
     bookings = db.get_user_bookings(message.from_user.id, include_cancelled=False)
@@ -1994,7 +1980,7 @@ async def cmd_profile(message: types.Message):
         await message.answer("⚠️ Сначала зарегистрируйтесь через /start")
         return
     
-    await message.answer("👤 <b>Загружаю информацию о профиле...</b>", reply_markup=get_cancel_keyboard())
+    await message.answer("👤 <b>Загружаю информацию о профиле...</b>")
     await asyncio.sleep(0.5)
     
     user = db.get_user(message.from_user.id)
@@ -2026,7 +2012,7 @@ async def cmd_help(message: types.Message):
     help_text = (
         "ℹ️ <b>Загружаю справочную информацию...</b>"
     )
-    await message.answer(help_text, reply_markup=get_cancel_keyboard())
+    await message.answer(help_text)
     await asyncio.sleep(0.5)
     
     help_text = (
@@ -2096,7 +2082,7 @@ async def admin_users(message: types.Message):
     
     response = "👥 <b>Список пользователей:</b>\n\n"
     
-    for i, user in enumerate(users[:20], 1):  # Показываем первые 20
+    for i, user in enumerate(users[:20], 1):
         response += (
             f"<b>{i}. {user['first_name']}</b>\n"
             f"👤 ID: {user['user_id']}\n"
@@ -2140,7 +2126,7 @@ async def admin_spots(message: types.Message):
     
     response = "🅿️ <b>Список парковочных мест:</b>\n\n"
     
-    for i, spot in enumerate(spots[:15], 1):  # Показываем первые 15
+    for i, spot in enumerate(spots[:15], 1):
         owner_name = spot['first_name'] or spot['username'] or "Владелец"
         response += (
             f"<b>{i}. Место {spot['spot_number']}</b>\n"
@@ -2185,7 +2171,7 @@ async def admin_bookings(message: types.Message):
     
     response = "📅 <b>Список бронирований (последние 30 дней):</b>\n\n"
     
-    for i, booking in enumerate(bookings[:10], 1):  # Показываем первые 10
+    for i, booking in enumerate(bookings[:10], 1):
         start_dt = datetime.strptime(booking['start_datetime'], "%Y-%m-%d %H:%M:%S")
         end_dt = datetime.strptime(booking['end_datetime'], "%Y-%m-%d %H:%M:%S")
         
@@ -2265,74 +2251,4 @@ async def admin_statistics(message: types.Message):
 
 # ============ ADMIN: НАЗАД ============
 @dp.callback_query_handler(lambda c: c.data == 'admin_back')
-async def admin_back(callback_query: types.CallbackQuery):
-    await callback_query.message.edit_text("🔄 Возвращаюсь в админ-панель...")
-    await asyncio.sleep(0.5)
-    
-    markup = get_admin_keyboard()
-    await callback_query.message.answer("👑 <b>Админ-панель</b>\n\n"
-                                     "Выберите раздел для управления:",
-                                     reply_markup=markup)
-    await callback_query.answer()
-
-# ============ ОБРАБОТЧИК ОТМЕНЫ ============
-@dp.callback_query_handler(lambda c: c.data == 'cancel', state="*")
-async def cancel_callback(callback_query: types.CallbackQuery, state: FSMContext):
-    await state.finish()
-    await callback_query.message.edit_text("❌ Действие отменено")
-    await show_main_menu(callback_query.message)
-    await callback_query.answer("❌ Действие отменено")
-
-@dp.message_handler(lambda message: message.text == "❌ Отмена", state="*")
-async def cancel_text(message: types.Message, state: FSMContext):
-    await state.finish()
-    await message.answer("❌ Действие отменено")
-    await show_main_menu(message)
-
-@dp.callback_query_handler(lambda c: c.data == 'back_to_main')
-async def back_to_main_callback(callback_query: types.CallbackQuery):
-    await callback_query.message.edit_text("🔄 Возвращаюсь в главное меню...")
-    await show_main_menu(callback_query.message)
-    await callback_query.answer()
-
-@dp.message_handler(lambda message: message.text == "🔙 Главное меню")
-async def back_to_main_from_admin(message: types.Message):
-    await message.answer("🔄 Возвращаюсь в главное меню...")
-    await asyncio.sleep(0.5)
-    await show_main_menu(message)
-
-# ============ ОБРАБОТЧИК ОШИБОК ============
-@dp.errors_handler()
-async def errors_handler(update, exception):
-    logger.error(f"Ошибка: {exception}")
-    
-    try:
-        if hasattr(update, 'message'):
-            await update.message.answer(
-                "❌ <b>Произошла ошибка</b>\n\n"
-                "Попробуйте выполнить действие еще раз.\n"
-                "Если ошибка повторяется, обратитесь к администратору."
-            )
-    except:
-        pass
-    
-    return True
-
-# ============ ОБЩИЙ ОБРАБОТЧИК СООБЩЕНИЙ ============
-@dp.message_handler(state="*", content_types=types.ContentTypes.ANY)
-async def handle_unknown(message: types.Message, state: FSMContext):
-    current_state = await state.get_state()
-    
-    if current_state:
-        await message.answer("Пожалуйста, введите текст или используйте кнопки меню", reply_markup=get_cancel_keyboard())
-    else:
-        await show_main_menu(message)
-
-# ============ ОСНОВНАЯ ФУНКЦИЯ ============
-if __name__ == '__main__':
-    logger.info("Бот запускается...")
-    
-    try:
-        executor.start_polling(dp, skip_updates=True)
-    except Exception as e:
-        logger.error(f"Критическая ошибка: {e}")
+async def
