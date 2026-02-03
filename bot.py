@@ -6,16 +6,25 @@ from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.utils import executor
 from datetime import datetime, timedelta
 import re
+import asyncio
 
 from config import BOT_TOKEN, ADMIN_CHAT_ID, ADMIN_PASSWORD
 from database import Database
 
-bot = Bot(token=BOT_TOKEN)
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+bot = Bot(token=BOT_TOKEN, parse_mode='HTML')
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
 
 db = Database()
 
+# ============ STATES ============
 class UserRegistration(StatesGroup):
     waiting_for_name = State()
     waiting_for_phone = State()
@@ -24,34 +33,35 @@ class AddParkingSpot(StatesGroup):
     waiting_for_spot_number = State()
     waiting_for_price_hour = State()
     waiting_for_price_day = State()
-    waiting_for_date_selection = State()
-    waiting_for_custom_date = State()
-    waiting_for_time_range = State()
-
-class BookParkingSpot(StatesGroup):
-    waiting_for_date_selection = State()
-    waiting_for_custom_date = State()
-    waiting_for_spot_selection = State()
-    waiting_for_time_selection = State()
+    waiting_for_start_date = State()
+    waiting_for_start_time = State()
+    waiting_for_end_date = State()
+    waiting_for_end_time = State()
     waiting_for_confirmation = State()
 
-class AdminPanel(StatesGroup):
-    waiting_for_password = State()
+class BookParkingSpot(StatesGroup):
+    waiting_for_start_date = State()
+    waiting_for_start_time = State()
+    waiting_for_end_date = State()
+    waiting_for_end_time = State()
+    waiting_for_spot_selection = State()
+    waiting_for_confirmation = State()
 
-def get_next_days(count=4):
-    today = datetime.now().date()
-    return [today + timedelta(days=i) for i in range(count)]
+class EditProfile(StatesGroup):
+    waiting_for_name = State()
+    waiting_for_phone = State()
 
-def format_date(date):
-    if isinstance(date, str):
-        return date
-    return date.strftime("%d.%m.%Y")
-
+# ============ HELPER FUNCTIONS ============
 def parse_date(date_str):
+    """Парсит дату из различных форматов"""
     try:
-        date_str = date_str.strip()
-        # Убираем все нецифровые символы, кроме точек
-        date_str = re.sub(r'[^\d.]+', '', date_str)
+        date_str = str(date_str).strip()
+        
+        # Убираем все нецифровые символы, кроме точек и дефисов
+        date_str = re.sub(r'[^\d\.\-/]+', '', date_str)
+        
+        # Заменяем разделители на точки
+        date_str = date_str.replace('/', '.').replace('-', '.')
         
         parts = date_str.split('.')
         if len(parts) == 3:
@@ -61,90 +71,297 @@ def parse_date(date_str):
             
             if len(year) == 2:
                 year = '20' + year
+            elif len(year) != 4:
+                return None
             
-            date_str = f"{day}.{month}.{year}"
-            return datetime.strptime(date_str, "%d.%m.%Y").date()
+            # Проверяем валидность даты
+            try:
+                date_obj = datetime.strptime(f"{day}.{month}.{year}", "%d.%m.%Y").date()
+                return date_obj
+            except ValueError:
+                return None
         return None
-    except:
+    except Exception as e:
+        logger.error(f"Ошибка парсинга даты: {e}")
         return None
 
-def create_date_keyboard(action_type="book"):
-    days = get_next_days(4)
-    markup = types.InlineKeyboardMarkup(row_width=2)
+def parse_time(time_str):
+    """Парсит время из различных форматов"""
+    try:
+        time_str = str(time_str).strip()
+        
+        # Убираем все нецифровые символы, кроме двоеточий и точек
+        time_str = re.sub(r'[^\d:\.]+', '', time_str)
+        
+        # Заменяем точки на двоеточия
+        time_str = time_str.replace('.', ':')
+        
+        # Добавляем двоеточие если его нет
+        if ':' not in time_str and len(time_str) == 4:
+            time_str = time_str[:2] + ':' + time_str[2:]
+        elif ':' not in time_str and len(time_str) == 3:
+            time_str = '0' + time_str[:1] + ':' + time_str[1:]
+        
+        # Проверяем формат
+        try:
+            time_obj = datetime.strptime(time_str, "%H:%M").time()
+            return time_obj
+        except ValueError:
+            return None
+    except Exception as e:
+        logger.error(f"Ошибка парсинга времени: {e}")
+        return None
+
+def format_date(date):
+    """Форматирует дату для отображения"""
+    if isinstance(date, str):
+        try:
+            date = datetime.strptime(date, "%Y-%m-%d").date()
+        except:
+            return date
+    return date.strftime("%d.%m.%Y")
+
+def format_datetime(dt_str):
+    """Форматирует дату-время для отображения"""
+    try:
+        if isinstance(dt_str, str):
+            dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+        else:
+            dt = dt_str
+        
+        return dt.strftime("%d.%m.%Y %H:%M")
+    except:
+        return dt_str
+
+def format_time(time_obj):
+    """Форматирует время для отображения"""
+    if isinstance(time_obj, str):
+        return time_obj
+    return time_obj.strftime("%H:%M")
+
+def get_next_days(count=7):
+    """Возвращает список следующих дней"""
+    today = datetime.now().date()
+    return [today + timedelta(days=i) for i in range(count)]
+
+def calculate_price(price_per_hour, price_per_day, start_datetime, end_datetime):
+    """Рассчитывает стоимость аренды"""
+    # Вычисляем продолжительность в часах
+    duration_hours = (end_datetime - start_datetime).total_seconds() / 3600
     
-    for day in days:
-        markup.insert(types.InlineKeyboardButton(
-            format_date(day),
-            callback_data=f"{action_type}_date_{day}"
-        ))
+    # Вычисляем продолжительность в днях (целых)
+    duration_days = int(duration_hours // 24)
+    remaining_hours = duration_hours % 24
     
-    markup.add(types.InlineKeyboardButton("📅 Выбрать свою дату", callback_data=f"{action_type}_custom_date"))
-    markup.add(types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_action"))
+    # Рассчитываем стоимость
+    total_price = duration_days * price_per_day
+    
+    # Если осталось больше 6 часов, считаем как полный день
+    if remaining_hours > 6:
+        total_price += price_per_day
+    else:
+        total_price += remaining_hours * price_per_hour
+    
+    return round(total_price, 2), duration_hours
+
+def validate_datetime_range(start_date, start_time, end_date, end_time):
+    """Проверяет валидность диапазона дат и времени"""
+    start_datetime = datetime.combine(start_date, start_time)
+    end_datetime = datetime.combine(end_date, end_time)
+    
+    # Проверяем, что конечное время позже начального
+    if end_datetime <= start_datetime:
+        return False, "❌ Время окончания должно быть позже времени начала!"
+    
+    # Проверяем, что не пытаемся забронировать в прошлом
+    if start_datetime < datetime.now():
+        return False, "❌ Нельзя забронировать место в прошлом!"
+    
+    # Проверяем, что аренда не слишком длинная (максимум 30 дней)
+    if (end_datetime - start_datetime).days > 30:
+        return False, "❌ Максимальный срок аренды - 30 дней!"
+    
+    return True, "✅ Диапазон времени корректен"
+
+# ============ KEYBOARDS ============
+def get_main_keyboard(user_id):
+    """Клавиатура главного меню"""
+    is_admin = db.is_admin(user_id)
+    
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    
+    buttons = [
+        "🚗 Сдать место",
+        "📅 Найти место",
+        "📊 Мои места", 
+        "📋 Мои брони",
+        "👤 Профиль",
+        "ℹ️ Помощь"
+    ]
+    
+    # Добавляем кнопки в зависимости от роли
+    for i in range(0, len(buttons), 2):
+        row = buttons[i:i+2]
+        markup.add(*row)
+    
+    if is_admin:
+        markup.add("👑 Админ-панель")
     
     return markup
 
-def get_main_keyboard(user_id):
+def get_cancel_keyboard():
+    """Клавиатура с кнопкой отмены"""
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add("❌ Отмена")
+    return markup
+
+def get_yes_no_keyboard():
+    """Клавиатура с Да/Нет"""
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add("✅ Да", "❌ Нет")
+    markup.add("❌ Отмена")
+    return markup
+
+def get_date_selection_keyboard(action="book", include_custom=True):
+    """Клавиатура выбора даты"""
+    days = get_next_days(14)  # Увеличиваем до 14 дней
+    markup = types.InlineKeyboardMarkup(row_width=3)
     
-    if db.is_admin(user_id):
-        markup.add("🚗 Добавить парковочное место", "📅 Забронировать место")
-        markup.add("📊 Мои места", "📋 Мои бронирования")
-        markup.add("👑 Админ-панель")
-    else:
-        markup.add("🚗 Добавить парковочное место", "📅 Забронировать место")
-        markup.add("📊 Мои места", "📋 Мои бронирования")
+    # Группируем по неделям
+    week1 = days[:7]
+    week2 = days[7:] if len(days) > 7 else []
+    
+    for day in week1:
+        day_name = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"][day.weekday()]
+        text = f"{format_date(day)}"
+        markup.insert(types.InlineKeyboardButton(
+            text=text,
+            callback_data=f"{action}_date_{day}"
+        ))
+    
+    if week2:
+        markup.row()
+        for day in week2:
+            day_name = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"][day.weekday()]
+            text = f"{format_date(day)}"
+            markup.insert(types.InlineKeyboardButton(
+                text=text,
+                callback_data=f"{action}_date_{day}"
+            ))
+    
+    if include_custom:
+        markup.row(types.InlineKeyboardButton(
+            "📅 Другая дата",
+            callback_data=f"{action}_custom_date"
+        ))
+    
+    markup.row(types.InlineKeyboardButton("❌ Отмена", callback_data="cancel"))
+    
+    return markup
+
+def get_time_selection_keyboard():
+    """Клавиатура выбора времени"""
+    markup = types.InlineKeyboardMarkup(row_width=4)
+    
+    # Часы с шагом 1
+    for hour in range(0, 24):
+        for minute in [0, 30]:
+            time_str = f"{hour:02d}:{minute:02d}"
+            markup.insert(types.InlineKeyboardButton(
+                time_str,
+                callback_data=f"time_{time_str}"
+            ))
+    
+    markup.row(types.InlineKeyboardButton("🕐 Свое время", callback_data="custom_time"))
+    markup.row(types.InlineKeyboardButton("❌ Отмена", callback_data="cancel"))
     
     return markup
 
 def get_admin_keyboard():
+    """Клавиатура админ-панели"""
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add("👥 Все пользователи", "🅿️ Все места")
-    markup.add("📅 Все бронирования", "📊 Статистика")
+    markup.add(
+        "👥 Пользователи",
+        "🅿️ Места",
+        "📅 Бронирования",
+        "📊 Статистика",
+        "📢 Рассылка"
+    )
     markup.add("🔙 Главное меню")
     return markup
 
-# ============ ОБРАБОТЧИКИ ============
-
+# ============ START COMMAND ============
 @dp.message_handler(commands=['start'], state="*")
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.finish()
     
     user_id = message.from_user.id
+    username = message.from_user.username or ""
+    first_name = message.from_user.first_name or ""
+    
+    welcome_text = (
+        "🚗 <b>Добро пожаловать в сервис бронирования парковок!</b>\n\n"
+        "Здесь вы можете:\n"
+        "• 🚗 Сдать в аренду свое парковочное место\n"
+        "• 📅 Забронировать место для парковки\n"
+        "• 💰 Зарабатывать на своем парковочном месте\n\n"
+        "<b>Особенности:</b>\n"
+        "• Можно сдавать место на несколько дней\n"
+        "• Можно бронировать на любое время\n"
+        "• Гибкая система цен\n"
+    )
     
     if not db.check_user_exists(user_id):
-        username = message.from_user.username or ""
-        first_name = message.from_user.first_name or ""
-        
-        await message.answer("👋 Добро пожаловать!")
-        await message.answer("📝 Введите ваше имя:")
+        await message.answer(welcome_text)
+        await message.answer("📝 Введите ваше полное имя:")
         
         await state.update_data(username=username, first_name=first_name)
         await UserRegistration.waiting_for_name.set()
     else:
         await show_main_menu(message)
 
-async def show_main_menu(message: types.Message):
-    markup = get_main_keyboard(message.from_user.id)
-    await message.answer("🏠 Главное меню", reply_markup=markup)
-
 @dp.message_handler(state=UserRegistration.waiting_for_name)
 async def process_name(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await message.answer("❌ Регистрация отменена")
+        return
+    
     name = message.text.strip()
-    if not name:
-        await message.answer("❌ Имя не может быть пустым. Введите имя:")
+    if len(name) < 2:
+        await message.answer("❌ Имя должно содержать минимум 2 символа. Введите имя:")
         return
     
     await state.update_data(name=name)
-    await message.answer("📱 Введите ваш номер телефона:")
+    await message.answer("📱 Введите ваш номер телефона в формате +7XXXXXXXXXX:")
     await UserRegistration.waiting_for_phone.set()
 
 @dp.message_handler(state=UserRegistration.waiting_for_phone)
 async def process_phone(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await message.answer("❌ Регистрация отменена")
+        return
+    
     phone = message.text.strip()
     
-    if not phone:
-        await message.answer("❌ Введите номер телефона:")
+    # Проверка формата телефона
+    phone_pattern = re.compile(r'^\+?7\d{10}$|^8\d{10}$|^\d{11}$')
+    if not phone_pattern.match(phone.replace(' ', '')):
+        await message.answer("❌ Неверный формат телефона. Введите в формате +7XXXXXXXXXX:")
         return
+    
+    # Нормализуем номер
+    phone = phone.replace(' ', '')
+    if phone.startswith('8'):
+        phone = '+7' + phone[1:]
+    elif phone.startswith('7'):
+        phone = '+' + phone
+    elif not phone.startswith('+7'):
+        if len(phone) == 11:
+            phone = '+7' + phone[1:]
+        elif len(phone) == 10:
+            phone = '+7' + phone
     
     user_data = await state.get_data()
     user = message.from_user
@@ -157,372 +374,1239 @@ async def process_phone(message: types.Message, state: FSMContext):
     )
     
     if success:
+        # Уведомление админу
         try:
             await bot.send_message(
                 ADMIN_CHAT_ID,
-                f"👤 Новый пользователь:\n"
+                f"👤 <b>Новый пользователь</b>\n"
                 f"Имя: {user_data['name']}\n"
                 f"Телефон: {phone}\n"
-                f"Username: @{user.username}"
+                f"Username: @{user.username if user.username else 'нет'}\n"
+                f"ID: {user.id}"
             )
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Ошибка отправки уведомления админу: {e}")
         
         await show_main_menu(message)
+        await message.answer(f"✅ <b>Регистрация завершена!</b>\n\n"
+                          f"👤 <b>Ваши данные:</b>\n"
+                          f"Имя: {user_data['name']}\n"
+                          f"Телефон: {phone}")
     else:
-        await message.answer("❌ Ошибка при регистрации. Попробуйте /start")
+        await message.answer("❌ Ошибка при регистрации. Попробуйте снова через /start")
     
     await state.finish()
 
-# ============ ДОБАВЛЕНИЕ МЕСТА ============
+async def show_main_menu(message: types.Message):
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await cmd_start(message, None)
+        return
+    
+    # Проверяем непрочитанные уведомления
+    notifications = db.get_unread_notifications(user_id)
+    if notifications:
+        await message.answer(f"📢 У вас {len(notifications)} непрочитанных уведомлений!\n"
+                          "Используйте команду /notifications для просмотра")
+    
+    markup = get_main_keyboard(user_id)
+    await message.answer("🏠 <b>Главное меню</b>\n\n"
+                      "Выберите действие:", reply_markup=markup)
 
-@dp.message_handler(lambda message: message.text == "🚗 Добавить парковочное место")
+# ============ ADD PARKING SPOT (С ДВУМЯ ДАТАМИ) ============
+@dp.message_handler(lambda message: message.text == "🚗 Сдать место")
 async def cmd_add_spot(message: types.Message):
     if not db.check_user_exists(message.from_user.id):
         await message.answer("⚠️ Сначала зарегистрируйтесь через /start")
         return
     
-    await message.answer("🚗 Введите номер парковочного места:")
+    await message.answer("🚗 <b>Сдача парковочного места в аренду</b>\n\n"
+                      "Введите номер парковочного места (например: A15 или 42):",
+                      reply_markup=get_cancel_keyboard())
     await AddParkingSpot.waiting_for_spot_number.set()
 
 @dp.message_handler(state=AddParkingSpot.waiting_for_spot_number)
 async def process_spot_number(message: types.Message, state: FSMContext):
-    spot_number = message.text.strip()
-    if not spot_number:
-        await message.answer("❌ Номер места не может быть пустым:")
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await show_main_menu(message)
         return
     
+    spot_number = message.text.strip().upper()
+    if len(spot_number) < 1:
+        await message.answer("❌ Номер места не может быть пустым. Введите номер:")
+        return
+    
+    # Проверяем, есть ли уже такое место у пользователя
+    user_spots = db.get_user_spots(message.from_user.id)
+    for spot in user_spots:
+        if spot['spot_number'] == spot_number:
+            await message.answer(f"❌ Место с номером {spot_number} уже существует у вас.\n"
+                              "Введите другой номер:")
+            return
+    
     await state.update_data(spot_number=spot_number)
-    await message.answer("💰 Введите цену за час (например: 100):")
+    await message.answer("💰 <b>Установка цены</b>\n\n"
+                      "Введите стоимость аренды за 1 час (в рублях):\n"
+                      "Например: 100")
     await AddParkingSpot.waiting_for_price_hour.set()
 
 @dp.message_handler(state=AddParkingSpot.waiting_for_price_hour)
 async def process_price_hour(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await show_main_menu(message)
+        return
+    
     try:
-        price = float(message.text)
+        price = float(message.text.replace(',', '.'))
         if price <= 0:
-            await message.answer("❌ Цена должна быть больше 0:")
+            await message.answer("❌ Цена должна быть больше 0. Введите стоимость:")
             return
+        if price > 10000:
+            await message.answer("❌ Слишком высокая цена. Введите разумную стоимость (до 10000 руб):")
+            return
+        
         await state.update_data(price_hour=price)
-        await message.answer("💰 Введите цену за сутки (например: 800):")
+        await message.answer("💰 Введите стоимость аренды за сутки (24 часа) в рублях:\n"
+                          "Например: 800\n"
+                          "<i>Рекомендуется установить немного меньше, чем цена за час × 24</i>")
         await AddParkingSpot.waiting_for_price_day.set()
-    except:
-        await message.answer("❌ Введите корректную сумму:")
+    except ValueError:
+        await message.answer("❌ Введите корректное число. Например: 100")
 
 @dp.message_handler(state=AddParkingSpot.waiting_for_price_day)
 async def process_price_day(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await show_main_menu(message)
+        return
+    
     try:
-        price = float(message.text)
+        price = float(message.text.replace(',', '.'))
         if price <= 0:
-            await message.answer("❌ Цена должна быть больше 0:")
+            await message.answer("❌ Цена должна быть больше 0. Введите стоимость:")
+            return
+        
+        user_data = await state.get_data()
+        price_hour = user_data.get('price_hour', 0)
+        
+        if price < price_hour:
+            await message.answer(f"❌ Цена за сутки не может быть меньше цены за час ({price_hour} руб).\n"
+                              "Введите стоимость за сутки:")
             return
         
         await state.update_data(price_day=price)
         
-        markup = create_date_keyboard(action_type="add")
-        await message.answer("📅 Выберите дату для сдачи места:", reply_markup=markup)
-        await AddParkingSpot.waiting_for_date_selection.set()
-    except:
-        await message.answer("❌ Введите корректную сумму:")
+        await message.answer("📅 <b>Укажите дату и время начала аренды</b>\n\n"
+                          "Выберите дату начала или введите свою в формате ДД.ММ.ГГГГ:\n"
+                          "Например: 21.02.2026",
+                          reply_markup=get_date_selection_keyboard("add_start"))
+        await AddParkingSpot.waiting_for_start_date.set()
+    except ValueError:
+        await message.answer("❌ Введите корректное число. Например: 800")
 
-@dp.callback_query_handler(lambda c: c.data.startswith('add_date_'), state=AddParkingSpot.waiting_for_date_selection)
-async def process_add_date(callback_query: types.CallbackQuery, state: FSMContext):
-    date_str = callback_query.data.replace('add_date_', '')
+@dp.callback_query_handler(lambda c: c.data.startswith('add_start_date_'), state=AddParkingSpot.waiting_for_start_date)
+async def process_start_date(callback_query: types.CallbackQuery, state: FSMContext):
+    if callback_query.data == "cancel":
+        await state.finish()
+        await show_main_menu(callback_query.message)
+        return
+    
+    if callback_query.data == "add_start_custom_date":
+        await bot.send_message(
+            callback_query.from_user.id,
+            "📅 Введите дату начала в формате ДД.ММ.ГГГГ:\n"
+            "Или введите 'сегодня' или 'завтра'",
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    date_str = callback_query.data.replace('add_start_date_', '')
     try:
         selected_date = datetime.strptime(date_str, "%Y-%m-%d").date()
     except:
-        await bot.send_message(callback_query.from_user.id, "❌ Ошибка выбора даты")
-        await state.finish()
+        await callback_query.answer("❌ Ошибка выбора даты")
         return
     
-    await state.update_data(selected_date=selected_date)
+    await state.update_data(start_date=selected_date)
+    
     await bot.send_message(
         callback_query.from_user.id,
-        f"🕐 Введите время для {format_date(selected_date)} в формате ЧЧ.ММ-ЧЧ.ММ (например: 09.00-18.00):"
+        f"🕐 <b>Укажите время начала аренды</b>\n\n"
+        f"Дата: {format_date(selected_date)}\n"
+        f"Выберите время начала или введите свое в формате ЧЧ:ММ\n"
+        f"Например: 21:00",
+        reply_markup=get_time_selection_keyboard()
     )
-    await AddParkingSpot.waiting_for_time_range.set()
+    await AddParkingSpot.waiting_for_start_time.set()
+    await callback_query.answer()
 
-@dp.callback_query_handler(lambda c: c.data == 'add_custom_date', state=AddParkingSpot.waiting_for_date_selection)
-async def process_add_custom_date(callback_query: types.CallbackQuery, state: FSMContext):
-    await bot.send_message(callback_query.from_user.id, "📅 Введите дату в формате ДД.ММ.ГГГГ:")
-    await AddParkingSpot.waiting_for_custom_date.set()
-
-@dp.message_handler(state=AddParkingSpot.waiting_for_custom_date)
-async def process_add_custom_date_input(message: types.Message, state: FSMContext):
-    date_str = message.text.strip()
-    selected_date = parse_date(date_str)
+@dp.message_handler(state=AddParkingSpot.waiting_for_start_date)
+async def process_start_date_custom(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await show_main_menu(message)
+        return
+    
+    date_input = message.text.strip().lower()
+    
+    # Обработка специальных слов
+    if date_input == "сегодня":
+        selected_date = datetime.now().date()
+    elif date_input == "завтра":
+        selected_date = datetime.now().date() + timedelta(days=1)
+    else:
+        selected_date = parse_date(date_input)
     
     if not selected_date:
-        await message.answer("❌ Неверный формат. Введите ДД.ММ.ГГГГ:")
+        await message.answer("❌ Неверный формат даты. Введите ДД.ММ.ГГГГ:")
         return
     
     today = datetime.now().date()
     if selected_date < today:
-        await message.answer("❌ Нельзя выбрать прошедшую дату:")
+        await message.answer("❌ Нельзя выбрать прошедшую дату. Введите будущую дату:")
         return
     
-    await state.update_data(selected_date=selected_date)
-    await message.answer(f"🕐 Введите время для {format_date(selected_date)} в формате ЧЧ.ММ-ЧЧ.ММ:")
-    await AddParkingSpot.waiting_for_time_range.set()
+    await state.update_data(start_date=selected_date)
+    
+    await message.answer(f"🕐 <b>Укажите время начала аренды</b>\n\n"
+                      f"Дата: {format_date(selected_date)}\n"
+                      f"Выберите время начала или введите свое в формате ЧЧ:ММ\n"
+                      f"Например: 21:00",
+                      reply_markup=get_time_selection_keyboard())
+    await AddParkingSpot.waiting_for_start_time.set()
 
-@dp.message_handler(state=AddParkingSpot.waiting_for_time_range)
-async def process_time_range(message: types.Message, state: FSMContext):
-    try:
-        time_range = message.text.strip()
-        if '-' not in time_range:
-            await message.answer("❌ Неверный формат. Используйте ЧЧ.ММ-ЧЧ.ММ:")
-            return
-        
-        start_str, end_str = time_range.split('-')
-        start_time = datetime.strptime(start_str.strip(), "%H.%M").time()
-        end_time = datetime.strptime(end_str.strip(), "%H.%M").time()
-        
-        if start_time >= end_time:
-            await message.answer("❌ Время окончания должно быть позже:")
-            return
-        
-        user_data = await state.get_data()
-        
-        spot_id = db.add_parking_spot(
-            owner_id=message.from_user.id,
-            spot_number=user_data['spot_number'],
-            price_per_hour=user_data['price_hour'],
-            price_per_day=user_data['price_day']
-        )
-        
-        if spot_id:
-            success = db.add_availability(
-                spot_id=spot_id,
-                date=user_data['selected_date'],
-                start_time=start_time,
-                end_time=end_time
-            )
-            
-            if success:
-                try:
-                    await bot.send_message(
-                        ADMIN_CHAT_ID,
-                        f"🅿️ Новое место:\n"
-                        f"Место: {user_data['spot_number']}\n"
-                        f"Владелец: @{message.from_user.username}\n"
-                        f"Дата: {format_date(user_data['selected_date'])}\n"
-                        f"Время: {time_range}"
-                    )
-                except:
-                    pass
-                
-                await message.answer(
-                    f"✅ Место добавлено!\n"
-                    f"Номер: {user_data['spot_number']}\n"
-                    f"Дата: {format_date(user_data['selected_date'])}\n"
-                    f"Время: {time_range}"
-                )
-            else:
-                await message.answer("❌ Ошибка при добавлении доступности")
-        else:
-            await message.answer("❌ Ошибка при добавлении места")
-        
+@dp.callback_query_handler(lambda c: c.data.startswith('time_'), state=AddParkingSpot.waiting_for_start_time)
+async def process_start_time(callback_query: types.CallbackQuery, state: FSMContext):
+    if callback_query.data == "cancel":
         await state.finish()
+        await show_main_menu(callback_query.message)
+        return
+    
+    if callback_query.data == "custom_time":
+        await bot.send_message(
+            callback_query.from_user.id,
+            "🕐 Введите время начала в формате ЧЧ:ММ\n"
+            "Например: 21:30",
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    time_str = callback_query.data.replace('time_', '')
+    time_obj = parse_time(time_str)
+    
+    if not time_obj:
+        await callback_query.answer("❌ Ошибка выбора времени")
+        return
+    
+    await state.update_data(start_time=time_obj)
+    
+    user_data = await state.get_data()
+    start_date = user_data.get('start_date')
+    
+    await bot.send_message(
+        callback_query.from_user.id,
+        f"📅 <b>Укажите дату окончания аренды</b>\n\n"
+        f"Начало: {format_date(start_date)} {format_time(time_obj)}\n\n"
+        f"Выберите дату окончания или введите свою в формате ДД.ММ.ГГГГ:\n"
+        f"<i>Можно указать ту же дату, если аренда в пределах одного дня</i>",
+        reply_markup=get_date_selection_keyboard("add_end")
+    )
+    await AddParkingSpot.waiting_for_end_date.set()
+    await callback_query.answer()
+
+@dp.message_handler(state=AddParkingSpot.waiting_for_start_time)
+async def process_start_time_custom(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await show_main_menu(message)
+        return
+    
+    time_str = message.text.strip()
+    time_obj = parse_time(time_str)
+    
+    if not time_obj:
+        await message.answer("❌ Неверный формат времени. Введите ЧЧ:ММ:")
+        return
+    
+    await state.update_data(start_time=time_obj)
+    
+    user_data = await state.get_data()
+    start_date = user_data.get('start_date')
+    
+    await message.answer(f"📅 <b>Укажите дату окончания аренды</b>\n\n"
+                      f"Начало: {format_date(start_date)} {format_time(time_obj)}\n\n"
+                      f"Выберите дату окончания или введите свою в формате ДД.ММ.ГГГГ:\n"
+                      f"<i>Можно указать ту же дату, если аренда в пределах одного дня</i>",
+                      reply_markup=get_date_selection_keyboard("add_end"))
+    await AddParkingSpot.waiting_for_end_date.set()
+
+@dp.callback_query_handler(lambda c: c.data.startswith('add_end_date_'), state=AddParkingSpot.waiting_for_end_date)
+async def process_end_date(callback_query: types.CallbackQuery, state: FSMContext):
+    if callback_query.data == "cancel":
+        await state.finish()
+        await show_main_menu(callback_query.message)
+        return
+    
+    if callback_query.data == "add_end_custom_date":
+        await bot.send_message(
+            callback_query.from_user.id,
+            "📅 Введите дату окончания в формате ДД.ММ.ГГГГ:",
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    date_str = callback_query.data.replace('add_end_date_', '')
+    try:
+        selected_date = datetime.strptime(date_str, "%Y-%m-%d").date()
     except:
-        await message.answer("❌ Неверный формат времени. Используйте ЧЧ.ММ-ЧЧ.ММ")
+        await callback_query.answer("❌ Ошибка выбора даты")
+        return
+    
+    user_data = await state.get_data()
+    start_date = user_data.get('start_date')
+    
+    # Проверяем, что дата окончания не раньше даты начала
+    if selected_date < start_date:
+        await callback_query.answer("❌ Дата окончания не может быть раньше даты начала!")
+        return
+    
+    await state.update_data(end_date=selected_date)
+    
+    await bot.send_message(
+        callback_query.from_user.id,
+        f"🕐 <b>Укажите время окончания аренды</b>\n\n"
+        f"Начало: {format_date(start_date)} {format_time(user_data.get('start_time'))}\n"
+        f"Окончание: {format_date(selected_date)}\n\n"
+        f"Выберите время окончания или введите свое в формате ЧЧ:ММ\n"
+        f"Например: 09:00",
+        reply_markup=get_time_selection_keyboard()
+    )
+    await AddParkingSpot.waiting_for_end_time.set()
+    await callback_query.answer()
 
-# ============ БРОНИРОВАНИЕ ============
+@dp.message_handler(state=AddParkingSpot.waiting_for_end_date)
+async def process_end_date_custom(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await show_main_menu(message)
+        return
+    
+    date_input = message.text.strip()
+    selected_date = parse_date(date_input)
+    
+    if not selected_date:
+        await message.answer("❌ Неверный формат даты. Введите ДД.ММ.ГГГГ:")
+        return
+    
+    user_data = await state.get_data()
+    start_date = user_data.get('start_date')
+    
+    # Проверяем, что дата окончания не раньше даты начала
+    if selected_date < start_date:
+        await message.answer("❌ Дата окончания не может быть раньше даты начала!")
+        return
+    
+    await state.update_data(end_date=selected_date)
+    
+    await message.answer(f"🕐 <b>Укажите время окончания аренды</b>\n\n"
+                      f"Начало: {format_date(start_date)} {format_time(user_data.get('start_time'))}\n"
+                      f"Окончание: {format_date(selected_date)}\n\n"
+                      f"Выберите время окончания или введите свое в формате ЧЧ:ММ\n"
+                      f"Например: 09:00",
+                      reply_markup=get_time_selection_keyboard())
+    await AddParkingSpot.waiting_for_end_time.set()
 
-@dp.message_handler(lambda message: message.text == "📅 Забронировать место")
-async def cmd_book_spot(message: types.Message):
+@dp.callback_query_handler(lambda c: c.data.startswith('time_'), state=AddParkingSpot.waiting_for_end_time)
+async def process_end_time(callback_query: types.CallbackQuery, state: FSMContext):
+    if callback_query.data == "cancel":
+        await state.finish()
+        await show_main_menu(callback_query.message)
+        return
+    
+    if callback_query.data == "custom_time":
+        await bot.send_message(
+            callback_query.from_user.id,
+            "🕐 Введите время окончания в формате ЧЧ:ММ\n"
+            "Например: 09:30",
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    time_str = callback_query.data.replace('time_', '')
+    time_obj = parse_time(time_str)
+    
+    if not time_obj:
+        await callback_query.answer("❌ Ошибка выбора времени")
+        return
+    
+    user_data = await state.get_data()
+    
+    # Получаем все данные
+    start_date = user_data.get('start_date')
+    start_time = user_data.get('start_time')
+    end_date = user_data.get('end_date')
+    
+    # Проверяем валидность диапазона
+    start_datetime = datetime.combine(start_date, start_time)
+    end_datetime = datetime.combine(end_date, time_obj)
+    
+    # Если даты одинаковые, проверяем что время окончания позже времени начала
+    if start_date == end_date and time_obj <= start_time:
+        await callback_query.answer("❌ Время окончания должно быть позже времени начала!")
+        return
+    
+    # Проверяем что конечное время позже начального
+    if end_datetime <= start_datetime:
+        await callback_query.answer("❌ Время окончания должно быть позже времени начала!")
+        return
+    
+    await state.update_data(end_time=time_obj)
+    
+    # Рассчитываем стоимость
+    price_per_hour = user_data.get('price_hour')
+    price_per_day = user_data.get('price_day')
+    total_price, duration_hours = calculate_price(price_per_hour, price_per_day, start_datetime, end_datetime)
+    
+    await state.update_data(total_price=total_price, duration_hours=duration_hours)
+    
+    # Формируем текст подтверждения
+    spot_number = user_data.get('spot_number')
+    
+    # Проверяем, один ли день или несколько
+    if start_date == end_date:
+        period_text = f"{format_date(start_date)} с {format_time(start_time)} до {format_time(time_obj)}"
+    else:
+        period_text = f"с {format_date(start_date)} {format_time(start_time)} по {format_date(end_date)} {format_time(time_obj)}"
+    
+    confirmation_text = (
+        f"✅ <b>Подтверждение добавления места</b>\n\n"
+        f"📍 <b>Номер места:</b> {spot_number}\n"
+        f"💰 <b>Цена за час:</b> {price_per_hour} руб.\n"
+        f"💰 <b>Цена за сутки:</b> {price_per_day} руб.\n"
+        f"📅 <b>Период аренды:</b> {period_text}\n"
+        f"⏱️ <b>Продолжительность:</b> {duration_hours:.1f} ч.\n"
+        f"💰 <b>Общая стоимость:</b> {total_price:.2f} руб.\n\n"
+        f"Все верно?"
+    )
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("✅ Да, добавить", callback_data="confirm_add_spot"),
+        types.InlineKeyboardButton("❌ Нет, изменить", callback_data="change_spot_data")
+    )
+    markup.add(types.InlineKeyboardButton("❌ Отмена", callback_data="cancel"))
+    
+    await bot.send_message(callback_query.from_user.id, confirmation_text, reply_markup=markup)
+    await AddParkingSpot.waiting_for_confirmation.set()
+    await callback_query.answer()
+
+@dp.message_handler(state=AddParkingSpot.waiting_for_end_time)
+async def process_end_time_custom(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await show_main_menu(message)
+        return
+    
+    time_str = message.text.strip()
+    time_obj = parse_time(time_str)
+    
+    if not time_obj:
+        await message.answer("❌ Неверный формат времени. Введите ЧЧ:ММ:")
+        return
+    
+    user_data = await state.get_data()
+    
+    # Получаем все данные
+    start_date = user_data.get('start_date')
+    start_time = user_data.get('start_time')
+    end_date = user_data.get('end_date')
+    
+    # Проверяем валидность диапазона
+    start_datetime = datetime.combine(start_date, start_time)
+    end_datetime = datetime.combine(end_date, time_obj)
+    
+    # Если даты одинаковые, проверяем что время окончания позже времени начала
+    if start_date == end_date and time_obj <= start_time:
+        await message.answer("❌ Время окончания должно быть позже времени начала!")
+        return
+    
+    # Проверяем что конечное время позже начального
+    if end_datetime <= start_datetime:
+        await message.answer("❌ Время окончания должно быть позже времени начала!")
+        return
+    
+    await state.update_data(end_time=time_obj)
+    
+    # Рассчитываем стоимость
+    price_per_hour = user_data.get('price_hour')
+    price_per_day = user_data.get('price_day')
+    total_price, duration_hours = calculate_price(price_per_hour, price_per_day, start_datetime, end_datetime)
+    
+    await state.update_data(total_price=total_price, duration_hours=duration_hours)
+    
+    # Формируем текст подтверждения
+    spot_number = user_data.get('spot_number')
+    
+    # Проверяем, один ли день или несколько
+    if start_date == end_date:
+        period_text = f"{format_date(start_date)} с {format_time(start_time)} до {format_time(time_obj)}"
+    else:
+        period_text = f"с {format_date(start_date)} {format_time(start_time)} по {format_date(end_date)} {format_time(time_obj)}"
+    
+    confirmation_text = (
+        f"✅ <b>Подтверждение добавления места</b>\n\n"
+        f"📍 <b>Номер места:</b> {spot_number}\n"
+        f"💰 <b>Цена за час:</b> {price_per_hour} руб.\n"
+        f"💰 <b>Цена за сутки:</b> {price_per_day} руб.\n"
+        f"📅 <b>Период аренды:</b> {period_text}\n"
+        f"⏱️ <b>Продолжительность:</b> {duration_hours:.1f} ч.\n"
+        f"💰 <b>Общая стоимость:</b> {total_price:.2f} руб.\n\n"
+        f"Все верно?"
+    )
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("✅ Да, добавить", callback_data="confirm_add_spot"),
+        types.InlineKeyboardButton("❌ Нет, изменить", callback_data="change_spot_data")
+    )
+    markup.add(types.InlineKeyboardButton("❌ Отмена", callback_data="cancel"))
+    
+    await message.answer(confirmation_text, reply_markup=markup)
+    await AddParkingSpot.waiting_for_confirmation.set()
+
+@dp.callback_query_handler(lambda c: c.data == 'confirm_add_spot', state=AddParkingSpot.waiting_for_confirmation)
+async def confirm_add_spot_final(callback_query: types.CallbackQuery, state: FSMContext):
+    user_data = await state.get_data()
+    
+    # Создаем место в базе данных
+    spot_id = db.add_parking_spot(
+        owner_id=callback_query.from_user.id,
+        spot_number=user_data['spot_number'],
+        price_per_hour=user_data['price_hour'],
+        price_per_day=user_data['price_day']
+    )
+    
+    if not spot_id:
+        await callback_query.message.edit_text(
+            "❌ <b>Ошибка!</b>\n"
+            "Не удалось добавить место. Возможно, место с таким номером уже существует."
+        )
+        await state.finish()
+        return
+    
+    # Создаем даты и время
+    start_date = user_data.get('start_date')
+    start_time = user_data.get('start_time')
+    end_date = user_data.get('end_date')
+    end_time = user_data.get('end_time')
+    
+    start_datetime = datetime.combine(start_date, start_time)
+    end_datetime = datetime.combine(end_date, end_time)
+    
+    # Добавляем период доступности
+    period_id = db.add_availability_period(
+        spot_id=spot_id,
+        start_datetime=start_datetime.strftime("%Y-%m-%d %H:%M:%S"),
+        end_datetime=end_datetime.strftime("%Y-%m-%d %H:%M:%S")
+    )
+    
+    if not period_id:
+        await callback_query.message.edit_text(
+            "❌ <b>Ошибка!</b>\n"
+            "Не удалось добавить период доступности."
+        )
+        await state.finish()
+        return
+    
+    # Уведомление админу
+    try:
+        user = callback_query.from_user
+        await bot.send_message(
+            ADMIN_CHAT_ID,
+            f"🅿️ <b>Добавлено новое место</b>\n"
+            f"Место: {user_data['spot_number']}\n"
+            f"Владелец: @{user.username if user.username else 'нет'}\n"
+            f"Цена/час: {user_data['price_hour']} руб.\n"
+            f"Период: {format_datetime(start_datetime)} - {format_datetime(end_datetime)}"
+        )
+    except Exception as e:
+        logger.error(f"Ошибка отправки уведомления админу: {e}")
+    
+    success_text = (
+        f"✅ <b>Место успешно добавлено!</b>\n\n"
+        f"📍 <b>Номер места:</b> {user_data['spot_number']}\n"
+        f"💰 <b>Цена за час:</b> {user_data['price_hour']} руб.\n"
+        f"💰 <b>Цена за сутки:</b> {user_data['price_day']} руб.\n"
+        f"📅 <b>Период аренды:</b>\n"
+    )
+    
+    if start_date == end_date:
+        success_text += f"  {format_date(start_date)} с {format_time(start_time)} до {format_time(end_time)}\n"
+    else:
+        success_text += f"  с {format_date(start_date)} {format_time(start_time)}\n"
+        success_text += f"  по {format_date(end_date)} {format_time(end_time)}\n"
+    
+    success_text += f"⏱️ <b>Продолжительность:</b> {user_data.get('duration_hours', 0):.1f} ч.\n"
+    success_text += f"💰 <b>Стоимость за период:</b> {user_data.get('total_price', 0):.2f} руб.\n\n"
+    success_text += "Теперь другие пользователи могут бронировать ваше место!"
+    
+    await callback_query.message.edit_text(success_text)
+    
+    # Показываем главное меню
+    await asyncio.sleep(2)
+    await show_main_menu(callback_query.message)
+    
+    await state.finish()
+    await callback_query.answer()
+
+# ============ BOOK PARKING SPOT (С ДВУМЯ ДАТАМИ) ============
+@dp.message_handler(lambda message: message.text == "📅 Найти место")
+async def cmd_find_spot(message: types.Message):
     if not db.check_user_exists(message.from_user.id):
         await message.answer("⚠️ Сначала зарегистрируйтесь через /start")
         return
     
-    markup = create_date_keyboard(action_type="book")
-    await message.answer("📅 Выберите дату бронирования:", reply_markup=markup)
-    await BookParkingSpot.waiting_for_date_selection.set()
+    await message.answer("📅 <b>Поиск свободного места</b>\n\n"
+                      "Укажите дату и время начала аренды.\n"
+                      "Выберите дату или введите свою в формате ДД.ММ.ГГГГ:",
+                      reply_markup=get_date_selection_keyboard("book_start"))
+    await BookParkingSpot.waiting_for_start_date.set()
 
-@dp.callback_query_handler(lambda c: c.data.startswith('book_date_'), state=BookParkingSpot.waiting_for_date_selection)
-async def process_book_date(callback_query: types.CallbackQuery, state: FSMContext):
-    date_str = callback_query.data.replace('book_date_', '')
-    try:
-        selected_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-    except:
-        await bot.send_message(callback_query.from_user.id, "❌ Ошибка выбора даты")
+@dp.callback_query_handler(lambda c: c.data.startswith('book_start_date_'), state=BookParkingSpot.waiting_for_start_date)
+async def process_book_start_date(callback_query: types.CallbackQuery, state: FSMContext):
+    if callback_query.data == "cancel":
         await state.finish()
+        await show_main_menu(callback_query.message)
         return
     
-    await state.update_data(selected_date=selected_date)
-    await show_available_spots(callback_query, selected_date)
-
-async def show_available_spots(callback_query: types.CallbackQuery, selected_date):
-    spots = db.get_available_spots(selected_date)
-    
-    if not spots:
+    if callback_query.data == "book_start_custom_date":
         await bot.send_message(
             callback_query.from_user.id,
-            f"❌ На {format_date(selected_date)} нет доступных мест."
+            "📅 Введите дату начала в формате ДД.ММ.ГГГГ:\n"
+            "Или введите 'сегодня' или 'завтра'",
+            reply_markup=get_cancel_keyboard()
         )
         return
     
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    for spot in spots:
-        owner_info = spot['username'] or spot['first_name']
-        markup.add(types.InlineKeyboardButton(
-            f"📍 {spot['spot_number']} - {spot['price_per_hour']}₽/час",
-            callback_data=f"select_spot_{spot['id']}"
-        ))
+    date_str = callback_query.data.replace('book_start_date_', '')
+    try:
+        selected_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except:
+        await callback_query.answer("❌ Ошибка выбора даты")
+        return
+    
+    await state.update_data(start_date=selected_date)
     
     await bot.send_message(
         callback_query.from_user.id,
-        f"🅿️ Доступные места на {format_date(selected_date)}:",
-        reply_markup=markup
+        f"🕐 <b>Укажите время начала аренды</b>\n\n"
+        f"Дата: {format_date(selected_date)}\n"
+        f"Выберите время начала или введите свое в формате ЧЧ:ММ:",
+        reply_markup=get_time_selection_keyboard()
     )
-    await BookParkingSpot.waiting_for_spot_selection.set()
+    await BookParkingSpot.waiting_for_start_time.set()
+    await callback_query.answer()
 
-@dp.callback_query_handler(lambda c: c.data == 'book_custom_date', state=BookParkingSpot.waiting_for_date_selection)
-async def process_book_custom_date(callback_query: types.CallbackQuery, state: FSMContext):
-    await bot.send_message(callback_query.from_user.id, "📅 Введите дату в формате ДД.ММ.ГГГГ:")
-    await BookParkingSpot.waiting_for_custom_date.set()
-
-@dp.message_handler(state=BookParkingSpot.waiting_for_custom_date)
-async def process_book_custom_date_input(message: types.Message, state: FSMContext):
-    date_str = message.text.strip()
-    selected_date = parse_date(date_str)
+@dp.message_handler(state=BookParkingSpot.waiting_for_start_date)
+async def process_book_start_date_custom(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await show_main_menu(message)
+        return
+    
+    date_input = message.text.strip().lower()
+    
+    # Обработка специальных слов
+    if date_input == "сегодня":
+        selected_date = datetime.now().date()
+    elif date_input == "завтра":
+        selected_date = datetime.now().date() + timedelta(days=1)
+    else:
+        selected_date = parse_date(date_input)
     
     if not selected_date:
-        await message.answer("❌ Неверный формат. Введите ДД.ММ.ГГГГ:")
+        await message.answer("❌ Неверный формат даты. Введите ДД.ММ.ГГГГ:")
         return
     
     today = datetime.now().date()
     if selected_date < today:
-        await message.answer("❌ Нельзя выбрать прошедшую дату:")
+        await message.answer("❌ Нельзя выбрать прошедшую дату. Введите будущую дату:")
         return
     
-    await state.update_data(selected_date=selected_date)
-    spots = db.get_available_spots(selected_date)
+    await state.update_data(start_date=selected_date)
     
-    if not spots:
-        await message.answer(f"❌ На {format_date(selected_date)} нет доступных мест.")
-        return
-    
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    for spot in spots:
-        markup.add(types.InlineKeyboardButton(
-            f"📍 {spot['spot_number']} - {spot['price_per_hour']}₽/час",
-            callback_data=f"select_spot_{spot['id']}"
-        ))
-    
-    await message.answer(f"🅿️ Доступные места на {format_date(selected_date)}:", reply_markup=markup)
-    await BookParkingSpot.waiting_for_spot_selection.set()
+    await message.answer(f"🕐 <b>Укажите время начала аренды</b>\n\n"
+                      f"Дата: {format_date(selected_date)}\n"
+                      f"Выберите время начала или введите свое в формате ЧЧ:ММ:",
+                      reply_markup=get_time_selection_keyboard())
+    await BookParkingSpot.waiting_for_start_time.set()
 
-@dp.callback_query_handler(lambda c: c.data.startswith('select_spot_'), state=BookParkingSpot.waiting_for_spot_selection)
-async def process_spot_selection(callback_query: types.CallbackQuery, state: FSMContext):
-    try:
-        spot_id = int(callback_query.data.replace('select_spot_', ''))
-    except:
-        await bot.send_message(callback_query.from_user.id, "❌ Ошибка выбора места")
+@dp.callback_query_handler(lambda c: c.data.startswith('time_'), state=BookParkingSpot.waiting_for_start_time)
+async def process_book_start_time(callback_query: types.CallbackQuery, state: FSMContext):
+    if callback_query.data == "cancel":
         await state.finish()
+        await show_main_menu(callback_query.message)
         return
     
-    await state.update_data(selected_spot_id=spot_id)
-    await bot.send_message(callback_query.from_user.id, "🕐 Введите время в формате ЧЧ.ММ-ЧЧ.ММ (например: 14.00-16.00):")
-    await BookParkingSpot.waiting_for_time_selection.set()
+    if callback_query.data == "custom_time":
+        await bot.send_message(
+            callback_query.from_user.id,
+            "🕐 Введите время начала в формате ЧЧ:ММ:",
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    time_str = callback_query.data.replace('time_', '')
+    time_obj = parse_time(time_str)
+    
+    if not time_obj:
+        await callback_query.answer("❌ Ошибка выбора времени")
+        return
+    
+    await state.update_data(start_time=time_obj)
+    
+    user_data = await state.get_data()
+    start_date = user_data.get('start_date')
+    
+    await bot.send_message(
+        callback_query.from_user.id,
+        f"📅 <b>Укажите дату окончания аренды</b>\n\n"
+        f"Начало: {format_date(start_date)} {format_time(time_obj)}\n\n"
+        f"Выберите дату окончания или введите свою в формате ДД.ММ.ГГГГ:\n"
+        f"<i>Можно указать ту же дату, если аренда в пределах одного дня</i>",
+        reply_markup=get_date_selection_keyboard("book_end")
+    )
+    await BookParkingSpot.waiting_for_end_date.set()
+    await callback_query.answer()
 
-@dp.message_handler(state=BookParkingSpot.waiting_for_time_selection)
-async def process_book_time(message: types.Message, state: FSMContext):
+@dp.message_handler(state=BookParkingSpot.waiting_for_start_time)
+async def process_book_start_time_custom(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await show_main_menu(message)
+        return
+    
+    time_str = message.text.strip()
+    time_obj = parse_time(time_str)
+    
+    if not time_obj:
+        await message.answer("❌ Неверный формат времени. Введите ЧЧ:ММ:")
+        return
+    
+    await state.update_data(start_time=time_obj)
+    
+    user_data = await state.get_data()
+    start_date = user_data.get('start_date')
+    
+    await message.answer(f"📅 <b>Укажите дату окончания аренды</b>\n\n"
+                      f"Начало: {format_date(start_date)} {format_time(time_obj)}\n\n"
+                      f"Выберите дату окончания или введите свою в формате ДД.ММ.ГГГГ:\n"
+                      f"<i>Можно указать ту же дату, если аренда в пределах одного дня</i>",
+                      reply_markup=get_date_selection_keyboard("book_end"))
+    await BookParkingSpot.waiting_for_end_date.set()
+
+@dp.callback_query_handler(lambda c: c.data.startswith('book_end_date_'), state=BookParkingSpot.waiting_for_end_date)
+async def process_book_end_date(callback_query: types.CallbackQuery, state: FSMContext):
+    if callback_query.data == "cancel":
+        await state.finish()
+        await show_main_menu(callback_query.message)
+        return
+    
+    if callback_query.data == "book_end_custom_date":
+        await bot.send_message(
+            callback_query.from_user.id,
+            "📅 Введите дату окончания в формате ДД.ММ.ГГГГ:",
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    date_str = callback_query.data.replace('book_end_date_', '')
     try:
-        time_range = message.text.strip()
-        if '-' not in time_range:
-            await message.answer("❌ Неверный формат. Используйте ЧЧ.ММ-ЧЧ.ММ:")
-            return
-        
-        start_str, end_str = time_range.split('-')
-        start_time = datetime.strptime(start_str.strip(), "%H.%M").time()
-        end_time = datetime.strptime(end_str.strip(), "%H.%M").time()
-        
-        user_data = await state.get_data()
-        spots = db.get_available_spots(user_data['selected_date'])
-        selected_spot = next((s for s in spots if s['id'] == user_data['selected_spot_id']), None)
-        
-        if not selected_spot:
-            await message.answer("❌ Место больше не доступно")
-            await state.finish()
-            return
-        
-        hours = (datetime.combine(datetime.today(), end_time) - 
-                 datetime.combine(datetime.today(), start_time)).seconds / 3600
-        total_price = round(hours * selected_spot['price_per_hour'], 2)
-        
-        await state.update_data(
-            start_time=start_time,
-            end_time=end_time,
-            total_price=total_price,
-            time_range=time_range,
-            spot_number=selected_spot['spot_number']
-        )
-        
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_booking"),
-            types.InlineKeyboardButton("❌ Отменить", callback_data="cancel_action")
-        )
-        
-        await message.answer(
-            f"📋 Подтвердите бронирование:\n"
-            f"Дата: {format_date(user_data['selected_date'])}\n"
-            f"Время: {time_range}\n"
-            f"Стоимость: {total_price:.2f} руб.\n\n"
-            f"Подтвердить?",
-            reply_markup=markup
-        )
-        await BookParkingSpot.waiting_for_confirmation.set()
+        selected_date = datetime.strptime(date_str, "%Y-%m-%d").date()
     except:
-        await message.answer("❌ Неверный формат времени. Используйте ЧЧ.ММ-ЧЧ.ММ")
+        await callback_query.answer("❌ Ошибка выбора даты")
+        return
+    
+    user_data = await state.get_data()
+    start_date = user_data.get('start_date')
+    
+    # Проверяем, что дата окончания не раньше даты начала
+    if selected_date < start_date:
+        await callback_query.answer("❌ Дата окончания не может быть раньше даты начала!")
+        return
+    
+    await state.update_data(end_date=selected_date)
+    
+    await bot.send_message(
+        callback_query.from_user.id,
+        f"🕐 <b>Укажите время окончания аренды</b>\n\n"
+        f"Начало: {format_date(start_date)} {format_time(user_data.get('start_time'))}\n"
+        f"Окончание: {format_date(selected_date)}\n\n"
+        f"Выберите время окончания или введите свое в формате ЧЧ:ММ:",
+        reply_markup=get_time_selection_keyboard()
+    )
+    await BookParkingSpot.waiting_for_end_time.set()
+    await callback_query.answer()
 
-@dp.callback_query_handler(lambda c: c.data == 'confirm_booking', state=BookParkingSpot.waiting_for_confirmation)
-async def confirm_booking(callback_query: types.CallbackQuery, state: FSMContext):
+@dp.message_handler(state=BookParkingSpot.waiting_for_end_date)
+async def process_book_end_date_custom(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await show_main_menu(message)
+        return
+    
+    date_input = message.text.strip()
+    selected_date = parse_date(date_input)
+    
+    if not selected_date:
+        await message.answer("❌ Неверный формат даты. Введите ДД.ММ.ГГГГ:")
+        return
+    
+    user_data = await state.get_data()
+    start_date = user_data.get('start_date')
+    
+    # Проверяем, что дата окончания не раньше даты начала
+    if selected_date < start_date:
+        await message.answer("❌ Дата окончания не может быть раньше даты начала!")
+        return
+    
+    await state.update_data(end_date=selected_date)
+    
+    await message.answer(f"🕐 <b>Укажите время окончания аренды</b>\n\n"
+                      f"Начало: {format_date(start_date)} {format_time(user_data.get('start_time'))}\n"
+                      f"Окончание: {format_date(selected_date)}\n\n"
+                      f"Выберите время окончания или введите свое в формате ЧЧ:ММ:",
+                      reply_markup=get_time_selection_keyboard())
+    await BookParkingSpot.waiting_for_end_time.set()
+
+@dp.callback_query_handler(lambda c: c.data.startswith('time_'), state=BookParkingSpot.waiting_for_end_time)
+async def process_book_end_time(callback_query: types.CallbackQuery, state: FSMContext):
+    if callback_query.data == "cancel":
+        await state.finish()
+        await show_main_menu(callback_query.message)
+        return
+    
+    if callback_query.data == "custom_time":
+        await bot.send_message(
+            callback_query.from_user.id,
+            "🕐 Введите время окончания в формате ЧЧ:ММ:",
+            reply_markup=get_cancel_keyboard()
+        )
+        return
+    
+    time_str = callback_query.data.replace('time_', '')
+    time_obj = parse_time(time_str)
+    
+    if not time_obj:
+        await callback_query.answer("❌ Ошибка выбора времени")
+        return
+    
     user_data = await state.get_data()
     
-    booking_id = db.create_booking(
-        user_id=callback_query.from_user.id,
-        spot_id=user_data['selected_spot_id'],
-        date=user_data['selected_date'],
-        start_time=user_data['start_time'],
-        end_time=user_data['end_time'],
-        total_price=user_data['total_price']
-    )
+    # Получаем все данные
+    start_date = user_data.get('start_date')
+    start_time = user_data.get('start_time')
+    end_date = user_data.get('end_date')
     
-    if booking_id:
-        try:
-            await bot.send_message(
-                ADMIN_CHAT_ID,
-                f"📅 Новая бронь:\n"
-                f"Пользователь: @{callback_query.from_user.username}\n"
-                f"Дата: {format_date(user_data['selected_date'])}\n"
-                f"Время: {user_data['time_range']}\n"
-                f"Сумма: {user_data['total_price']:.2f} руб."
-            )
-        except:
-            pass
+    # Проверяем валидность диапазона
+    start_datetime = datetime.combine(start_date, start_time)
+    end_datetime = datetime.combine(end_date, time_obj)
+    
+    # Если даты одинаковые, проверяем что время окончания позже времени начала
+    if start_date == end_date and time_obj <= start_time:
+        await callback_query.answer("❌ Время окончания должно быть позже времени начала!")
+        return
+    
+    # Проверяем что конечное время позже начального
+    if end_datetime <= start_datetime:
+        await callback_query.answer("❌ Время окончания должно быть позже времени начала!")
+        return
+    
+    await state.update_data(end_time=time_obj)
+    
+    # Ищем доступные места
+    start_datetime_str = start_datetime.strftime("%Y-%m-%d %H:%M:%S")
+    end_datetime_str = end_datetime.strftime("%Y-%m-%d %H:%M:%S")
+    
+    available_spots = db.get_available_spots_by_date_range(start_datetime_str, end_datetime_str)
+    
+    if not available_spots:
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton(
+            "🔄 Выбрать другой период",
+            callback_data="choose_another_period"
+        ))
+        markup.add(types.InlineKeyboardButton("❌ Отмена", callback_data="cancel"))
+        
+        period_text = ""
+        if start_date == end_date:
+            period_text = f"{format_date(start_date)} с {format_time(start_time)} до {format_time(time_obj)}"
+        else:
+            period_text = f"с {format_date(start_date)} {format_time(start_time)} по {format_date(end_date)} {format_time(time_obj)}"
         
         await bot.send_message(
             callback_query.from_user.id,
-            f"✅ Бронь подтверждена!\n"
-            f"Номер: #{booking_id}\n"
+            f"❌ <b>На указанный период нет доступных мест</b>\n\n"
+            f"Период: {period_text}\n\n"
+            "Попробуйте выбрать другой период времени.",
+            reply_markup=markup
+        )
+        await callback_query.answer()
+        return
+    
+    # Сохраняем данные о периоде
+    await state.update_data(
+        start_datetime=start_datetime_str,
+        end_datetime=end_datetime_str
+    )
+    
+    # Создаем клавиатуру с доступными местами
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    
+    for spot in available_spots[:10]:  # Ограничиваем 10 местами
+        owner_name = spot['first_name'] or spot['username'] or "Владелец"
+        
+        button_text = (
+            f"📍 {spot['spot_number']} - {spot['price_per_hour']}₽/час"
+        )
+        
+        markup.add(types.InlineKeyboardButton(
+            button_text,
+            callback_data=f"select_spot_{spot['id']}"
+        ))
+    
+    if len(available_spots) > 10:
+        markup.row(types.InlineKeyboardButton(
+            f"📋 Показать еще {len(available_spots) - 10} мест",
+            callback_data="show_more_spots"
+        ))
+    
+    markup.row(types.InlineKeyboardButton("🔄 Выбрать другой период", callback_data="choose_another_period"))
+    markup.row(types.InlineKeyboardButton("❌ Отмена", callback_data="cancel"))
+    
+    period_text = ""
+    if start_date == end_date:
+        period_text = f"{format_date(start_date)} с {format_time(start_time)} до {format_time(time_obj)}"
+    else:
+        period_text = f"с {format_date(start_date)} {format_time(start_time)} по {format_date(end_date)} {format_time(time_obj)}"
+    
+    await bot.send_message(
+        callback_query.from_user.id,
+        f"🅿️ <b>Доступные места на период:</b>\n"
+        f"{period_text}\n\n"
+        f"Найдено мест: {len(available_spots)}\n"
+        "Выберите место для бронирования:",
+        reply_markup=markup
+    )
+    await BookParkingSpot.waiting_for_spot_selection.set()
+    await callback_query.answer()
+
+@dp.message_handler(state=BookParkingSpot.waiting_for_end_time)
+async def process_book_end_time_custom(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.finish()
+        await show_main_menu(message)
+        return
+    
+    time_str = message.text.strip()
+    time_obj = parse_time(time_str)
+    
+    if not time_obj:
+        await message.answer("❌ Неверный формат времени. Введите ЧЧ:ММ:")
+        return
+    
+    user_data = await state.get_data()
+    
+    # Получаем все данные
+    start_date = user_data.get('start_date')
+    start_time = user_data.get('start_time')
+    end_date = user_data.get('end_date')
+    
+    # Проверяем валидность диапазона
+    start_datetime = datetime.combine(start_date, start_time)
+    end_datetime = datetime.combine(end_date, time_obj)
+    
+    # Если даты одинаковые, проверяем что время окончания позже времени начала
+    if start_date == end_date and time_obj <= start_time:
+        await message.answer("❌ Время окончания должно быть позже времени начала!")
+        return
+    
+    # Проверяем что конечное время позже начального
+    if end_datetime <= start_datetime:
+        await message.answer("❌ Время окончания должно быть позже времени начала!")
+        return
+    
+    await state.update_data(end_time=time_obj)
+    
+    # Ищем доступные места
+    start_datetime_str = start_datetime.strftime("%Y-%m-%d %H:%M:%S")
+    end_datetime_str = end_datetime.strftime("%Y-%m-%d %H:%M:%S")
+    
+    available_spots = db.get_available_spots_by_date_range(start_datetime_str, end_datetime_str)
+    
+    if not available_spots:
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton(
+            "🔄 Выбрать другой период",
+            callback_data="choose_another_period"
+        ))
+        markup.add(types.InlineKeyboardButton("❌ Отмена", callback_data="cancel"))
+        
+        period_text = ""
+        if start_date == end_date:
+            period_text = f"{format_date(start_date)} с {format_time(start_time)} до {format_time(time_obj)}"
+        else:
+            period_text = f"с {format_date(start_date)} {format_time(start_time)} по {format_date(end_date)} {format_time(time_obj)}"
+        
+        await message.answer(
+            f"❌ <b>На указанный период нет доступных мест</b>\n\n"
+            f"Период: {period_text}\n\n"
+            "Попробуйте выбрать другой период времени.",
+            reply_markup=markup
+        )
+        return
+    
+    # Сохраняем данные о периоде
+    await state.update_data(
+        start_datetime=start_datetime_str,
+        end_datetime=end_datetime_str
+    )
+    
+    # Создаем клавиатуру с доступными местами
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    
+    for spot in available_spots[:10]:  # Ограничиваем 10 местами
+        owner_name = spot['first_name'] or spot['username'] or "Владелец"
+        
+        button_text = (
+            f"📍 {spot['spot_number']} - {spot['price_per_hour']}₽/час"
+        )
+        
+        markup.add(types.InlineKeyboardButton(
+            button_text,
+            callback_data=f"select_spot_{spot['id']}"
+        ))
+    
+    if len(available_spots) > 10:
+        markup.row(types.InlineKeyboardButton(
+            f"📋 Показать еще {len(available_spots) - 10} мест",
+            callback_data="show_more_spots"
+        ))
+    
+    markup.row(types.InlineKeyboardButton("🔄 Выбрать другой период", callback_data="choose_another_period"))
+    markup.row(types.InlineKeyboardButton("❌ Отмена", callback_data="cancel"))
+    
+    period_text = ""
+    if start_date == end_date:
+        period_text = f"{format_date(start_date)} с {format_time(start_time)} до {format_time(time_obj)}"
+    else:
+        period_text = f"с {format_date(start_date)} {format_time(start_time)} по {format_date(end_date)} {format_time(time_obj)}"
+    
+    await message.answer(
+        f"🅿️ <b>Доступные места на период:</b>\n"
+        f"{period_text}\n\n"
+        f"Найдено мест: {len(available_spots)}\n"
+        "Выберите место для бронирования:",
+        reply_markup=markup
+    )
+    await BookParkingSpot.waiting_for_spot_selection.set()
+
+@dp.callback_query_handler(lambda c: c.data == 'choose_another_period', state=[BookParkingSpot.waiting_for_spot_selection, BookParkingSpot.waiting_for_end_time])
+async def choose_another_period(callback_query: types.CallbackQuery, state: FSMContext):
+    await callback_query.message.edit_text(
+        "📅 <b>Поиск свободного места</b>\n\n"
+        "Укажите дату и время начала аренды.\n"
+        "Выберите дату или введите свою в формате ДД.ММ.ГГГГ:",
+        reply_markup=get_date_selection_keyboard("book_start")
+    )
+    await BookParkingSpot.waiting_for_start_date.set()
+    await callback_query.answer()
+
+@dp.callback_query_handler(lambda c: c.data.startswith('select_spot_'), state=BookParkingSpot.waiting_for_spot_selection)
+async def process_select_spot_booking(callback_query: types.CallbackQuery, state: FSMContext):
+    spot_id = int(callback_query.data.replace('select_spot_', ''))
+    
+    # Получаем информацию о месте
+    spot = db.get_parking_spot(spot_id)
+    if not spot:
+        await callback_query.answer("❌ Место не найдено")
+        return
+    
+    user_data = await state.get_data()
+    
+    # Парсим даты и время
+    start_datetime = datetime.strptime(user_data['start_datetime'], "%Y-%m-%d %H:%M:%S")
+    end_datetime = datetime.strptime(user_data['end_datetime'], "%Y-%m-%d %H:%M:%S")
+    
+    # Ищем подходящие периоды для этого места
+    available_periods = db.find_available_periods(
+        spot_id,
+        user_data['start_datetime'],
+        user_data['end_datetime']
+    )
+    
+    if not available_periods:
+        await callback_query.answer("❌ Это место больше не доступно на выбранный период")
+        return
+    
+    # Берем первый подходящий период
+    period = available_periods[0]
+    
+    # Рассчитываем стоимость
+    total_price, duration_hours = calculate_price(
+        spot['price_per_hour'],
+        spot['price_day'],
+        start_datetime,
+        end_datetime
+    )
+    
+    # Сохраняем данные
+    await state.update_data(
+        selected_spot_id=spot_id,
+        selected_period_id=period['id'],
+        spot_number=spot['spot_number'],
+        price_per_hour=spot['price_per_hour'],
+        price_per_day=spot['price_day'],
+        total_price=total_price,
+        duration_hours=duration_hours
+    )
+    
+    # Формируем текст подтверждения
+    start_date = start_datetime.date()
+    end_date = end_datetime.date()
+    start_time = start_datetime.time()
+    end_time = end_datetime.time()
+    
+    if start_date == end_date:
+        period_text = f"{format_date(start_date)} с {format_time(start_time)} до {format_time(end_time)}"
+    else:
+        period_text = f"с {format_date(start_date)} {format_time(start_time)} по {format_date(end_date)} {format_time(end_time)}"
+    
+    confirmation_text = (
+        f"✅ <b>Подтверждение бронирования</b>\n\n"
+        f"📍 <b>Место:</b> {spot['spot_number']}\n"
+        f"👤 <b>Владелец:</b> {spot['first_name'] or spot['username'] or 'Владелец'}\n"
+        f"📅 <b>Период:</b> {period_text}\n"
+        f"⏱️ <b>Продолжительность:</b> {duration_hours:.1f} ч.\n"
+        f"💰 <b>Стоимость:</b> {total_price:.2f} руб.\n\n"
+        f"Подтвердить бронирование?"
+    )
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_booking_final"),
+        types.InlineKeyboardButton("❌ Отменить", callback_data="cancel_booking")
+    )
+    markup.add(types.InlineKeyboardButton("✏️ Изменить период", callback_data="choose_another_period"))
+    
+    await callback_query.message.edit_text(confirmation_text, reply_markup=markup)
+    await BookParkingSpot.waiting_for_confirmation.set()
+    await callback_query.answer()
+
+@dp.callback_query_handler(lambda c: c.data == 'confirm_booking_final', state=BookParkingSpot.waiting_for_confirmation)
+async def confirm_booking_final(callback_query: types.CallbackQuery, state: FSMContext):
+    user_data = await state.get_data()
+    
+    # Создаем бронирование
+    booking_id = db.create_booking(
+        user_id=callback_query.from_user.id,
+        spot_id=user_data['selected_spot_id'],
+        period_id=user_data['selected_period_id'],
+        start_datetime=user_data['start_datetime'],
+        end_datetime=user_data['end_datetime'],
+        total_price=user_data['total_price']
+    )
+    
+    if not booking_id:
+        await callback_query.message.edit_text(
+            "❌ <b>Не удалось создать бронирование.</b>\n\n"
+            "Возможно, это место уже занято другим пользователем.\n"
+            "Пожалуйста, выберите другое место или период."
+        )
+        await callback_query.answer()
+        return
+    
+    # Уведомление админу
+    try:
+        user = callback_query.from_user
+        await bot.send_message(
+            ADMIN_CHAT_ID,
+            f"📅 <b>Новое бронирование #{booking_id}</b>\n"
+            f"👤 Пользователь: @{user.username if user.username else 'нет'}\n"
+            f"Место: {user_data['spot_number']}\n"
+            f"Период: {format_datetime(user_data['start_datetime'])} - {format_datetime(user_data['end_datetime'])}\n"
             f"Сумма: {user_data['total_price']:.2f} руб."
         )
+    except Exception as e:
+        logger.error(f"Ошибка отправки уведомления админу: {e}")
+    
+    # Уведомление владельцу места
+    try:
+        spot = db.get_parking_spot(user_data['selected_spot_id'])
+        if spot and spot['owner_id']:
+            start_dt = datetime.strptime(user_data['start_datetime'], "%Y-%m-%d %H:%M:%S")
+            end_dt = datetime.strptime(user_data['end_datetime'], "%Y-%m-%d %H:%M:%S")
+            
+            period_text = ""
+            if start_dt.date() == end_dt.date():
+                period_text = f"{format_date(start_dt.date())} с {format_time(start_dt.time())} до {format_time(end_dt.time())}"
+            else:
+                period_text = f"с {format_date(start_dt.date())} {format_time(start_dt.time())} по {format_date(end_dt.date())} {format_time(end_dt.time())}"
+            
+            await bot.send_message(
+                spot['owner_id'],
+                f"🔔 <b>Новое бронирование вашего места!</b>\n\n"
+                f"📍 Место: {user_data['spot_number']}\n"
+                f"👤 Арендатор: @{user.username if user.username else 'не указан'}\n"
+                f"📅 Период: {period_text}\n"
+                f"💰 Сумма: {user_data['total_price']:.2f} руб.\n\n"
+                f"Номер брони: #{booking_id}"
+            )
+    except Exception as e:
+        logger.error(f"Ошибка отправки уведомления владельцу: {e}")
+    
+    # Формируем текст успешного бронирования
+    start_dt = datetime.strptime(user_data['start_datetime'], "%Y-%m-%d %H:%M:%S")
+    end_dt = datetime.strptime(user_data['end_datetime'], "%Y-%m-%d %H:%M:%S")
+    
+    if start_dt.date() == end_dt.date():
+        period_text = f"{format_date(start_dt.date())} с {format_time(start_dt.time())} до {format_time(end_dt.time())}"
     else:
-        await bot.send_message(callback_query.from_user.id, "❌ Не удалось создать бронирование")
+        period_text = f"с {format_date(start_dt.date())} {format_time(start_dt.time())} по {format_date(end_dt.date())} {format_time(end_dt.time())}"
+    
+    success_text = (
+        f"✅ <b>Бронирование подтверждено!</b>\n\n"
+        f"📋 <b>Детали бронирования:</b>\n"
+        f"• Номер брони: #{booking_id}\n"
+        f"• Место: {user_data['spot_number']}\n"
+        f"• Период: {period_text}\n"
+        f"• Продолжительность: {user_data.get('duration_hours', 0):.1f} ч.\n"
+        f"• Стоимость: {user_data['total_price']:.2f} руб.\n\n"
+        f"ℹ️ Информация о местонахождении парковки будет отправлена вам перед началом аренды."
+    )
+    
+    await callback_query.message.edit_text(success_text)
+    
+    # Добавляем кнопку для просмотра всех бронирований
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton(
+        "📋 Мои бронирования",
+        callback_data="view_my_bookings"
+    ))
+    
+    await callback_query.message.reply(
+        "Вы можете посмотреть все свои бронирования в разделе '📋 Мои брони'",
+        reply_markup=markup
+    )
     
     await state.finish()
+    await callback_query.answer()
 
-# ============ КНОПКИ ОТМЕНЫ ============
-
-@dp.callback_query_handler(lambda c: c.data == 'cancel_action', state="*")
-async def cancel_action(callback_query: types.CallbackQuery, state: FSMContext):
-    await state.finish()
-    await show_main_menu(callback_query.message)
-    await callback_query.answer("❌ Действие отменено")
-
-# ============ МОИ МЕСТА И БРОНИРОВАНИЯ ============
-
+# ============ MY SPOTS ============
 @dp.message_handler(lambda message: message.text == "📊 Мои места")
 async def cmd_my_spots(message: types.Message):
     if not db.check_user_exists(message.from_user.id):
@@ -532,76 +1616,168 @@ async def cmd_my_spots(message: types.Message):
     spots = db.get_user_spots(message.from_user.id)
     
     if not spots:
-        await message.answer("У вас пока нет добавленных мест.")
+        await message.answer(
+            "🚗 <b>У вас пока нет добавленных мест</b>\n\n"
+            "Хотите добавить свое парковочное место для аренды?\n"
+            "Нажмите '🚗 Сдать место' в главном меню."
+        )
         return
     
-    response = "📊 Ваши места:\n\n"
+    response = "📍 <b>Ваши парковочные места:</b>\n\n"
+    
     for spot in spots:
         response += (
-            f"📍 Место: {spot['spot_number']}\n"
+            f"<b>Место: {spot['spot_number']}</b>\n"
             f"💰 Цена/час: {spot['price_per_hour']} руб.\n"
             f"💰 Цена/сутки: {spot['price_per_day']} руб.\n"
+            f"📅 Доступных периодов: {spot['total_periods'] - spot.get('booked_periods', 0)}\n"
+            f"📅 Забронировано: {spot.get('active_bookings', 0)}\n"
             f"────────────────────\n"
         )
     
     await message.answer(response)
 
-@dp.message_handler(lambda message: message.text == "📋 Мои бронирования")
+# ============ MY BOOKINGS ============
+@dp.message_handler(lambda message: message.text == "📋 Мои брони")
 async def cmd_my_bookings(message: types.Message):
     if not db.check_user_exists(message.from_user.id):
         await message.answer("⚠️ Сначала зарегистрируйтесь через /start")
         return
     
-    bookings = db.get_user_bookings(message.from_user.id)
+    bookings = db.get_user_bookings(message.from_user.id, include_cancelled=False)
     
     if not bookings:
-        await message.answer("У вас пока нет бронирований.")
+        await message.answer(
+            "📋 <b>У вас пока нет активных бронирований</b>\n\n"
+            "Найдите свободное место через меню '📅 Найти место'"
+        )
         return
     
-    response = "📋 Ваши бронирования:\n\n"
-    for booking in bookings:
+    response = "📋 <b>Ваши бронирования:</b>\n\n"
+    
+    for booking in bookings[:5]:  # Ограничиваем 5 бронированиями
+        start_dt = datetime.strptime(booking['start_datetime'], "%Y-%m-%d %H:%M:%S")
+        end_dt = datetime.strptime(booking['end_datetime'], "%Y-%m-%d %H:%M:%S")
+        
+        if start_dt.date() == end_dt.date():
+            period_text = f"{format_date(start_dt.date())} {format_time(start_dt.time())}-{format_time(end_dt.time())}"
+        else:
+            period_text = f"{format_datetime(start_dt)} - {format_datetime(end_dt)}"
+        
         response += (
-            f"Бронь #{booking['id']}\n"
-            f"Место: {booking['spot_number']}\n"
-            f"Дата: {booking['date']}\n"
-            f"Время: {booking['start_time'][:5]} - {booking['end_time'][:5]}\n"
-            f"Сумма: {booking['total_price']} руб.\n"
-            f"Статус: {booking['status']}\n"
+            f"<b>Бронь #{booking['id']}</b>\n"
+            f"📍 Место: {booking['spot_number']}\n"
+            f"📅 Период: {period_text}\n"
+            f"💰 Стоимость: {booking['total_price']} руб.\n"
+            f"📊 Статус: {booking['status']}\n"
             f"────────────────────\n"
         )
     
+    if len(bookings) > 5:
+        response += f"\n<i>И еще {len(bookings) - 5} бронирований...</i>"
+    
     await message.answer(response)
 
-# ============ АДМИН-ПАНЕЛЬ ============
+# ============ PROFILE ============
+@dp.message_handler(lambda message: message.text == "👤 Профиль")
+async def cmd_profile(message: types.Message):
+    if not db.check_user_exists(message.from_user.id):
+        await message.answer("⚠️ Сначала зарегистрируйтесь через /start")
+        return
+    
+    user = db.get_user(message.from_user.id)
+    spots = db.get_user_spots(message.from_user.id)
+    bookings = db.get_user_bookings(message.from_user.id)
+    
+    response = (
+        f"👤 <b>Ваш профиль</b>\n\n"
+        f"<b>Основная информация:</b>\n"
+        f"• Имя: {user['first_name']}\n"
+        f"• Телефон: {user['phone']}\n"
+        f"• Username: @{user['username'] if user['username'] else 'не указан'}\n"
+        f"• ID: {user['user_id']}\n\n"
+        
+        f"<b>Статистика:</b>\n"
+        f"• Мест добавлено: {len(spots)}\n"
+        f"• Активных броней: {len([b for b in bookings if b['status'] == 'active'])}\n"
+        f"• Всего броней: {len(bookings)}\n"
+    )
+    
+    if db.is_admin(message.from_user.id):
+        response += f"\n👑 <b>Статус:</b> Администратор\n"
+    
+    await message.answer(response)
 
+# ============ HELP ============
+@dp.message_handler(lambda message: message.text == "ℹ️ Помощь")
+async def cmd_help(message: types.Message):
+    help_text = (
+        "ℹ️ <b>Помощь по использованию бота</b>\n\n"
+        
+        "<b>Основные функции:</b>\n"
+        "• <b>🚗 Сдать место</b> - сдать свое парковочное место в аренду\n"
+        "• <b>📅 Найти место</b> - найти и забронировать свободное место\n"
+        "• <b>📊 Мои места</b> - просмотреть и управлять своими местами\n"
+        "• <b>📋 Мои брони</b> - просмотреть свои бронирования\n"
+        "• <b>👤 Профиль</b> - информация о вашем аккаунте\n\n"
+        
+        "<b>Как сдать место на несколько дней:</b>\n"
+        "1. Введите номер места и цены\n"
+        "2. Укажите дату и время начала аренды\n"
+        "3. Укажите дату и время окончания аренды\n"
+        "4. Подтвердите добавление\n\n"
+        
+        "<b>Как забронировать место на несколько дней:</b>\n"
+        "1. Укажите дату и время начала аренды\n"
+        "2. Укажите дату и время окончания аренды\n"
+        "3. Выберите из доступных мест\n"
+        "4. Подтвердите бронирование\n\n"
+        
+        "<b>Особенности:</b>\n"
+        "• Можно сдавать/бронировать на несколько дней\n"
+        "• Автоматический расчет стоимости\n"
+        "• Уведомления о новых бронированиях\n\n"
+        
+        "<b>Контакты поддержки:</b>\n"
+        "По вопросам работы бота обращайтесь к администратору.\n\n"
+        
+        "<b>Команды:</b>\n"
+        "/start - начало работы\n"
+        "/help - эта справка\n"
+        "/notifications - уведомления\n"
+        "/admin - панель администратора (если есть доступ)"
+    )
+    
+    await message.answer(help_text)
+
+# ============ ADMIN PANEL ============
 @dp.message_handler(commands=['admin'])
 async def cmd_admin(message: types.Message):
-    await message.answer("🔐 Введите пароль:")
-    await AdminPanel.waiting_for_password.set()
-
-@dp.message_handler(state=AdminPanel.waiting_for_password)
-async def process_admin_password(message: types.Message, state: FSMContext):
-    if message.text == ADMIN_PASSWORD:
-        db.set_admin(message.from_user.id)
-        markup = get_admin_keyboard()
-        await message.answer("✅ Доступ к админ-панели предоставлен!", reply_markup=markup)
-    else:
-        await message.answer("❌ Неверный пароль!")
+    if not db.is_admin(message.from_user.id):
+        await message.answer("🔐 Введите пароль для доступа к админ-панели:",
+                           reply_markup=get_cancel_keyboard())
+        return
     
-    await state.finish()
+    markup = get_admin_keyboard()
+    await message.answer("👑 <b>Админ-панель</b>\n\n"
+                      "Выберите раздел для управления:",
+                      reply_markup=markup)
 
 @dp.message_handler(lambda message: message.text == "👑 Админ-панель")
 async def cmd_admin_panel(message: types.Message):
-    if db.is_admin(message.from_user.id):
-        markup = get_admin_keyboard()
-        await message.answer("👑 Админ-панель", reply_markup=markup)
-    else:
-        await message.answer("⛔ У вас нет доступа!")
-
-@dp.message_handler(lambda message: message.text == "👥 Все пользователи")
-async def admin_all_users(message: types.Message):
     if not db.is_admin(message.from_user.id):
-        await message.answer("⛔ У вас нет доступа!")
+        await message.answer("❌ У вас нет доступа к админ-панели")
+        return
+    
+    markup = get_admin_keyboard()
+    await message.answer("👑 <b>Админ-панель</b>\n\n"
+                      "Выберите раздел для управления:",
+                      reply_markup=markup)
+
+@dp.message_handler(lambda message: message.text == "👥 Пользователи")
+async def admin_users(message: types.Message):
+    if not db.is_admin(message.from_user.id):
+        await message.answer("❌ У вас нет доступа")
         return
     
     users = db.get_all_users()
@@ -610,158 +1786,137 @@ async def admin_all_users(message: types.Message):
         await message.answer("Нет пользователей.")
         return
     
-    response = "👥 Все пользователи:\n\n"
-    for user in users:
-        admin_status = "👑 АДМИН" if user['is_admin'] else "👤 ПОЛЬЗОВАТЕЛЬ"
+    response = "👥 <b>Все пользователи:</b>\n\n"
+    
+    for user in users[:10]:
+        admin_icon = "👑 " if user['is_admin'] else "👤 "
         response += (
-            f"{admin_status}\n"
+            f"{admin_icon}<b>{user['first_name']}</b>\n"
             f"ID: {user['user_id']}\n"
-            f"Имя: {user['first_name']}\n"
             f"Телефон: {user['phone']}\n"
-            f"Username: @{user['username']}\n"
-            f"Мест: {user['total_spots']}\n"
-            f"Броней: {user['total_bookings']}\n"
+            f"Username: @{user['username'] if user['username'] else 'нет'}\n"
+            f"Мест: {user['total_spots']} | Броней: {user['total_bookings']}\n"
             f"────────────────────\n"
         )
     
-    await message.answer(response)
-
-@dp.message_handler(lambda message: message.text == "🅿️ Все места")
-async def admin_all_spots(message: types.Message):
-    if not db.is_admin(message.from_user.id):
-        await message.answer("⛔ У вас нет доступа!")
-        return
-    
-    spots = db.get_all_spots()
-    
-    if not spots:
-        await message.answer("Нет мест.")
-        return
-    
-    response = "🅿️ Все места:\n\n"
-    for spot in spots:
-        status = "✅ АКТИВНО" if spot['is_active'] else "❌ НЕАКТИВНО"
-        response += (
-            f"📍 Место #{spot['id']}\n"
-            f"Номер: {spot['spot_number']}\n"
-            f"Владелец: @{spot['username']} ({spot['first_name']})\n"
-            f"Телефон: {spot['phone']}\n"
-            f"💰 Цена/час: {spot['price_per_hour']} руб.\n"
-            f"💰 Цена/сутки: {spot['price_per_day']} руб.\n"
-            f"Статус: {status}\n"
-            f"────────────────────\n"
-        )
-    
-    await message.answer(response)
-
-@dp.message_handler(lambda message: message.text == "📅 Все бронирования")
-async def admin_all_bookings(message: types.Message):
-    if not db.is_admin(message.from_user.id):
-        await message.answer("⛔ У вас нет доступа!")
-        return
-    
-    bookings = db.get_all_bookings()
-    
-    if not bookings:
-        await message.answer("Нет бронирований.")
-        return
-    
-    response = "📅 Все бронирования:\n\n"
-    for booking in bookings:
-        response += (
-            f"Бронь #{booking['id']}\n"
-            f"👤 Пользователь: @{booking['user_username']} ({booking['user_name']})\n"
-            f"📞 Телефон: {booking['user_phone']}\n"
-            f"📍 Место: {booking['spot_number']}\n"
-            f"👤 Владелец: @{booking['owner_username']}\n"
-            f"📅 Дата: {booking['date']}\n"
-            f"🕐 Время: {booking['start_time'][:5]} - {booking['end_time'][:5]}\n"
-            f"💰 Сумма: {booking['total_price']} руб.\n"
-            f"📊 Статус: {booking['status']}\n"
-            f"────────────────────\n"
-        )
+    if len(users) > 10:
+        response += f"\n<i>И еще {len(users) - 10} пользователей...</i>"
     
     await message.answer(response)
 
 @dp.message_handler(lambda message: message.text == "📊 Статистика")
 async def admin_statistics(message: types.Message):
     if not db.is_admin(message.from_user.id):
-        await message.answer("⛔ У вас нет доступа!")
+        await message.answer("❌ У вас нет доступа")
         return
     
     stats = db.get_statistics()
     
     response = (
-        f"📊 Статистика:\n\n"
-        f"👥 Пользователей: {stats.get('total_users', 0)}\n"
-        f"🅿️ Активных мест: {stats.get('active_spots', 0)}\n"
-        f"📅 Всего бронирований: {stats.get('total_bookings', 0)}\n"
-        f"⏳ Ожидающих броней: {stats.get('pending_bookings', 0)}\n"
-        f"💳 Общий доход: {stats.get('total_income', 0):.2f} руб."
+        "📊 <b>Общая статистика:</b>\n\n"
+        
+        "<b>Пользователи:</b>\n"
+        f"• Всего пользователей: {stats.get('total_users', 0)}\n"
+        f"• Активных мест: {stats.get('active_spots', 0)}\n\n"
+        
+        "<b>Бронирования:</b>\n"
+        f"• Всего бронирований: {stats.get('total_bookings', 0)}\n"
+        f"• Активных броней: {stats.get('active_bookings', 0)}\n\n"
+        
+        "<b>Периоды:</b>\n"
+        f"• Доступных периодов: {stats.get('available_periods', 0)}\n"
+        f"• Занятых периодов: {stats.get('booked_periods', 0)}\n\n"
+        
+        "<b>Финансы:</b>\n"
+        f"• Общий доход: {stats.get('total_income', 0):.2f} руб.\n"
     )
     
     await message.answer(response)
 
 @dp.message_handler(lambda message: message.text == "🔙 Главное меню")
-async def cmd_main_menu(message: types.Message):
+async def back_to_main(message: types.Message):
     await show_main_menu(message)
 
-# ============ ОБРАБОТЧИК ВСЕХ СООБЩЕНИЙ ============
-
-@dp.message_handler(state="*", content_types=types.ContentTypes.TEXT)
-async def handle_all_messages(message: types.Message, state: FSMContext):
-    # Если сообщение - это команда меню, обрабатываем ее
-    menu_commands = [
-        "🚗 Добавить парковочное место", "📅 Забронировать место",
-        "📊 Мои места", "📋 Мои бронирования", "👑 Админ-панель",
-        "🔙 Главное меню", "👥 Все пользователи", "🅿️ Все места",
-        "📅 Все бронирования", "📊 Статистика"
-    ]
-    
-    if message.text in menu_commands:
-        await state.finish()  # Сбрасываем текущее состояние
-        
-        if message.text == "🚗 Добавить парковочное место":
-            await cmd_add_spot(message)
-        elif message.text == "📅 Забронировать место":
-            await cmd_book_spot(message)
-        elif message.text == "📊 Мои места":
-            await cmd_my_spots(message)
-        elif message.text == "📋 Мои бронирования":
-            await cmd_my_bookings(message)
-        elif message.text == "👑 Админ-панель":
-            await cmd_admin_panel(message)
-        elif message.text == "👥 Все пользователи":
-            await admin_all_users(message)
-        elif message.text == "🅿️ Все места":
-            await admin_all_spots(message)
-        elif message.text == "📅 Все бронирования":
-            await admin_all_bookings(message)
-        elif message.text == "📊 Статистика":
-            await admin_statistics(message)
-        elif message.text == "🔙 Главное меню":
-            await show_main_menu(message)
+# ============ NOTIFICATIONS ============
+@dp.message_handler(commands=['notifications'])
+async def cmd_notifications(message: types.Message):
+    if not db.check_user_exists(message.from_user.id):
+        await message.answer("⚠️ Сначала зарегистрируйтесь через /start")
         return
     
-    # Если не команда меню, проверяем состояние
-    current_state = await state.get_state()
-    if current_state:
-        # Если мы в состоянии ожидания даты, пробуем распарсить
-        if current_state in [
-            AddParkingSpot.waiting_for_custom_date.state,
-            BookParkingSpot.waiting_for_custom_date.state
-        ]:
-            # Передаем управление соответствующим хендлерам
-            return
-        else:
-            # Для других состояний игнорируем непонятные сообщения
-            pass
+    notifications = db.get_unread_notifications(message.from_user.id)
+    
+    if not notifications:
+        await message.answer("📭 У вас нет непрочитанных уведомлений")
+        return
+    
+    response = "📢 <b>Ваши уведомления:</b>\n\n"
+    
+    for i, notification in enumerate(notifications[:10], 1):
+        time = datetime.strptime(notification['created_at'], "%Y-%m-%d %H:%M:%S").strftime("%d.%m %H:%M")
+        response += f"{i}. <b>{time}</b>\n{notification['message']}\n\n"
+    
+    # Помечаем как прочитанные
+    db.mark_notifications_as_read(message.from_user.id)
+    
+    await message.answer(response)
 
+# ============ CANCEL HANDLER ============
+@dp.callback_query_handler(lambda c: c.data == 'cancel', state="*")
+async def cancel_callback(callback_query: types.CallbackQuery, state: FSMContext):
+    await state.finish()
+    await show_main_menu(callback_query.message)
+    await callback_query.answer("❌ Действие отменено")
+
+@dp.message_handler(lambda message: message.text == "❌ Отмена", state="*")
+async def cancel_text(message: types.Message, state: FSMContext):
+    await state.finish()
+    await show_main_menu(message)
+
+@dp.callback_query_handler(lambda c: c.data == 'change_spot_data', state=AddParkingSpot.waiting_for_confirmation)
+async def change_spot_data(callback_query: types.CallbackQuery, state: FSMContext):
+    await callback_query.message.edit_text(
+        "🚗 <b>Сдача парковочного места в аренду</b>\n\n"
+        "Введите номер парковочного места (например: A15 или 42):",
+        reply_markup=get_cancel_keyboard()
+    )
+    await AddParkingSpot.waiting_for_spot_number.set()
+    await callback_query.answer()
+
+# ============ ERROR HANDLER ============
 @dp.errors_handler()
 async def errors_handler(update, exception):
-    logging.error(f"Ошибка: {exception}")
+    logger.error(f"Ошибка: {exception}")
+    
+    try:
+        if hasattr(update, 'message'):
+            await update.message.answer(
+                "❌ <b>Произошла ошибка</b>\n\n"
+                "Попробуйте выполнить действие еще раз.\n"
+                "Если ошибка повторяется, обратитесь к администратору."
+            )
+    except:
+        pass
+    
     return True
 
+# ============ COMMON MESSAGE HANDLER ============
+@dp.message_handler(state="*", content_types=types.ContentTypes.ANY)
+async def handle_unknown(message: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+    
+    if current_state:
+        # Если мы в состоянии ожидания ввода, но пришло что-то другое
+        await message.answer("Пожалуйста, введите текст или используйте кнопки меню")
+    else:
+        # Если не в состоянии, показываем главное меню
+        await show_main_menu(message)
+
+# ============ MAIN ============
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO)
-    executor.start_polling(dp, skip_updates=True)
+    logger.info("Бот запускается...")
+    
+    try:
+        executor.start_polling(dp, skip_updates=True)
+    except Exception as e:
+        logger.error(f"Критическая ошибка: {e}")
