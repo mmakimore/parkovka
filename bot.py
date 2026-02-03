@@ -49,7 +49,7 @@ def format_date(date):
 
 # Команда /start
 @dp.message_handler(commands=['start'])
-async def cmd_start(message: types.Message):
+async def cmd_start(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     
     # Проверяем существование пользователя
@@ -60,64 +60,91 @@ async def cmd_start(message: types.Message):
         # Запрашиваем имя
         await message.answer(f"👋 Добро пожаловать! Ваш username: @{username}")
         await message.answer("📝 Введите ваше имя:")
+        
+        # Сохраняем username в состоянии
+        await state.update_data(username=username)
         await UserRegistration.waiting_for_name.set()
     else:
-        # Показываем главное меню
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-        markup.add("🚗 Добавить парковочное место", "📅 Забронировать место")
-        markup.add("📊 Мои места", "📋 Мои бронирования")
-        await message.answer("🎉 С возвращением! Что вы хотите сделать?", reply_markup=markup)
+        # Пользователь уже зарегистрирован
+        await show_main_menu(message)
+
+async def show_main_menu(message: types.Message):
+    """Показывает главное меню"""
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add("🚗 Добавить парковочное место", "📅 Забронировать место")
+    markup.add("📊 Мои места", "📋 Мои бронирования")
+    await message.answer("🎉 С возвращением! Что вы хотите сделать?", reply_markup=markup)
 
 # Регистрация пользователя
 @dp.message_handler(state=UserRegistration.waiting_for_name)
 async def process_name(message: types.Message, state: FSMContext):
-    await state.update_data(name=message.text)
+    name = message.text.strip()
+    if not name:
+        await message.answer("❌ Имя не может быть пустым. Введите ваше имя:")
+        return
+    
+    await state.update_data(name=name)
     await message.answer("📱 Теперь введите ваш номер телефона:")
     await UserRegistration.waiting_for_phone.set()
 
 @dp.message_handler(state=UserRegistration.waiting_for_phone)
 async def process_phone(message: types.Message, state: FSMContext):
-    phone = message.text
+    phone = message.text.strip()
+    if not phone:
+        await message.answer("❌ Номер телефона не может быть пустым. Введите ваш номер:")
+        return
+    
     user_data = await state.get_data()
     user = message.from_user
     
     # Сохраняем пользователя в БД
     success = db.add_user(
         user_id=user.id,
-        username=user.username,
+        username=user_data.get('username', user.username),
         first_name=user_data['name'],
         phone=phone
     )
     
     if success:
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-        markup.add("🚗 Добавить парковочное место", "📅 Забронировать место")
-        markup.add("📊 Мои места", "📋 Мои бронирования")
-        
-        await message.answer("✅ Регистрация завершена!", reply_markup=markup)
+        await show_main_menu(message)
         
         # Уведомление админу
-        await bot.send_message(
-            ADMIN_CHAT_ID,
-            f"👤 Новый пользователь зарегистрирован:\n"
-            f"Имя: {user_data['name']}\n"
-            f"Телефон: {phone}\n"
-            f"Username: @{user.username}"
-        )
+        try:
+            await bot.send_message(
+                ADMIN_CHAT_ID,
+                f"👤 Новый пользователь зарегистрирован:\n"
+                f"Имя: {user_data['name']}\n"
+                f"Телефон: {phone}\n"
+                f"Username: @{user.username}"
+            )
+        except Exception as e:
+            logging.error(f"Не удалось отправить уведомление админу: {e}")
+        
+        logging.info(f"Пользователь {user.id} успешно зарегистрирован")
     else:
-        await message.answer("❌ Ошибка при регистрации. Попробуйте еще раз.")
+        await message.answer("❌ Ошибка при регистрации. Попробуйте еще раз /start")
     
     await state.finish()
 
 # Добавление парковочного места
 @dp.message_handler(lambda message: message.text == "🚗 Добавить парковочное место")
 async def cmd_add_spot(message: types.Message):
+    # Проверяем, зарегистрирован ли пользователь
+    if not db.check_user_exists(message.from_user.id):
+        await message.answer("⚠️ Сначала зарегистрируйтесь через /start")
+        return
+    
     await message.answer("🚗 Введите номер парковочного места (например, A-15):")
     await AddParkingSpot.waiting_for_spot_number.set()
 
 @dp.message_handler(state=AddParkingSpot.waiting_for_spot_number)
 async def process_spot_number(message: types.Message, state: FSMContext):
-    await state.update_data(spot_number=message.text)
+    spot_number = message.text.strip()
+    if not spot_number:
+        await message.answer("❌ Номер места не может быть пустым. Введите номер:")
+        return
+    
+    await state.update_data(spot_number=spot_number)
     await message.answer("💰 Введите цену за час в рублях (например: 100):")
     await AddParkingSpot.waiting_for_price_hour.set()
 
@@ -125,16 +152,23 @@ async def process_spot_number(message: types.Message, state: FSMContext):
 async def process_price_hour(message: types.Message, state: FSMContext):
     try:
         price = float(message.text)
+        if price <= 0:
+            await message.answer("❌ Цена должна быть больше 0. Введите цену:")
+            return
         await state.update_data(price_hour=price)
         await message.answer("💰 Введите цену за сутки в рублях (например: 800):")
         await AddParkingSpot.waiting_for_price_day.set()
-    except:
+    except ValueError:
         await message.answer("❌ Введите корректную сумму (только цифры):")
 
 @dp.message_handler(state=AddParkingSpot.waiting_for_price_day)
 async def process_price_day(message: types.Message, state: FSMContext):
     try:
         price = float(message.text)
+        if price <= 0:
+            await message.answer("❌ Цена должна быть больше 0. Введите цену:")
+            return
+        
         await state.update_data(price_day=price)
         
         # Показываем ближайшие 4 дня
@@ -148,13 +182,18 @@ async def process_price_day(message: types.Message, state: FSMContext):
         
         await message.answer("📅 Выберите дату для сдачи места:", reply_markup=markup)
         await AddParkingSpot.waiting_for_date_selection.set()
-    except:
+    except ValueError:
         await message.answer("❌ Введите корректную сумму (только цифры):")
 
 @dp.callback_query_handler(lambda c: c.data.startswith('add_date_'), state=AddParkingSpot.waiting_for_date_selection)
 async def process_date_selection(callback_query: types.CallbackQuery, state: FSMContext):
     date_str = callback_query.data.replace('add_date_', '')
-    selected_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    try:
+        selected_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except:
+        await bot.send_message(callback_query.from_user.id, "❌ Ошибка выбора даты")
+        await state.finish()
+        return
     
     await state.update_data(selected_date=selected_date)
     await bot.send_message(
@@ -167,7 +206,7 @@ async def process_date_selection(callback_query: types.CallbackQuery, state: FSM
 @dp.message_handler(state=AddParkingSpot.waiting_for_time_range)
 async def process_time_range(message: types.Message, state: FSMContext):
     try:
-        time_range = message.text
+        time_range = message.text.strip()
         start_str, end_str = time_range.split('-')
         start_time = datetime.strptime(start_str.strip(), "%H.%M").time()
         end_time = datetime.strptime(end_str.strip(), "%H.%M").time()
@@ -184,44 +223,58 @@ async def process_time_range(message: types.Message, state: FSMContext):
         
         if spot_id:
             # Добавляем доступность
-            db.add_availability(
+            success = db.add_availability(
                 spot_id=spot_id,
                 date=user_data['selected_date'],
                 start_time=start_time,
                 end_time=end_time
             )
             
-            # Уведомление админу
-            await bot.send_message(
-                ADMIN_CHAT_ID,
-                f"🅿️ Новое парковочное место добавлено!\n"
-                f"Место: {user_data['spot_number']}\n"
-                f"Владелец: @{message.from_user.username}\n"
-                f"Цена/час: {user_data['price_hour']} руб.\n"
-                f"Цена/сутки: {user_data['price_day']} руб.\n"
-                f"Дата: {format_date(user_data['selected_date'])}\n"
-                f"Время: {time_range}"
-            )
-            
-            await message.answer(
-                f"✅ Парковочное место успешно добавлено!\n\n"
-                f"📌 Номер места: {user_data['spot_number']}\n"
-                f"📅 Дата: {format_date(user_data['selected_date'])}\n"
-                f"🕐 Время: {time_range}\n"
-                f"💰 Цена/час: {user_data['price_hour']} руб.\n"
-                f"💰 Цена/сутки: {user_data['price_day']} руб."
-            )
+            if success:
+                # Уведомление админу
+                try:
+                    await bot.send_message(
+                        ADMIN_CHAT_ID,
+                        f"🅿️ Новое парковочное место добавлено!\n"
+                        f"Место: {user_data['spot_number']}\n"
+                        f"Владелец: @{message.from_user.username}\n"
+                        f"Цена/час: {user_data['price_hour']} руб.\n"
+                        f"Цена/сутки: {user_data['price_day']} руб.\n"
+                        f"Дата: {format_date(user_data['selected_date'])}\n"
+                        f"Время: {time_range}"
+                    )
+                except Exception as e:
+                    logging.error(f"Не удалось отправить уведомление админу: {e}")
+                
+                await message.answer(
+                    f"✅ Парковочное место успешно добавлено!\n\n"
+                    f"📌 Номер места: {user_data['spot_number']}\n"
+                    f"📅 Дата: {format_date(user_data['selected_date'])}\n"
+                    f"🕐 Время: {time_range}\n"
+                    f"💰 Цена/час: {user_data['price_hour']} руб.\n"
+                    f"💰 Цена/сутки: {user_data['price_day']} руб."
+                )
+            else:
+                await message.answer("❌ Ошибка при добавлении доступности места.")
         else:
             await message.answer("❌ Ошибка при добавлении места.")
         
         await state.finish()
+    except ValueError as e:
+        logging.error(f"Ошибка формата времени: {e}")
+        await message.answer("❌ Неверный формат времени. Используйте ЧЧ.ММ-ЧЧ.ММ (например: 09.00-18.00)")
     except Exception as e:
         logging.error(f"Ошибка: {e}")
-        await message.answer("❌ Неверный формат времени. Используйте ЧЧ.ММ-ЧЧ.ММ")
+        await message.answer("❌ Произошла ошибка. Попробуйте еще раз.")
 
 # Бронирование места
 @dp.message_handler(lambda message: message.text == "📅 Забронировать место")
 async def cmd_book_spot(message: types.Message):
+    # Проверяем, зарегистрирован ли пользователь
+    if not db.check_user_exists(message.from_user.id):
+        await message.answer("⚠️ Сначала зарегистрируйтесь через /start")
+        return
+    
     # Показываем ближайшие 4 дня
     days = get_next_days()
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -237,7 +290,12 @@ async def cmd_book_spot(message: types.Message):
 @dp.callback_query_handler(lambda c: c.data.startswith('book_date_'), state=BookParkingSpot.waiting_for_date_selection)
 async def process_book_date(callback_query: types.CallbackQuery, state: FSMContext):
     date_str = callback_query.data.replace('book_date_', '')
-    selected_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    try:
+        selected_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except:
+        await bot.send_message(callback_query.from_user.id, "❌ Ошибка выбора даты")
+        await state.finish()
+        return
     
     await state.update_data(selected_date=selected_date)
     
@@ -268,7 +326,13 @@ async def process_book_date(callback_query: types.CallbackQuery, state: FSMConte
 
 @dp.callback_query_handler(lambda c: c.data.startswith('select_spot_'), state=BookParkingSpot.waiting_for_spot_selection)
 async def process_spot_selection(callback_query: types.CallbackQuery, state: FSMContext):
-    spot_id = int(callback_query.data.replace('select_spot_', ''))
+    try:
+        spot_id = int(callback_query.data.replace('select_spot_', ''))
+    except:
+        await bot.send_message(callback_query.from_user.id, "❌ Ошибка выбора места")
+        await state.finish()
+        return
+    
     await state.update_data(selected_spot_id=spot_id)
     
     await bot.send_message(
@@ -281,7 +345,7 @@ async def process_spot_selection(callback_query: types.CallbackQuery, state: FSM
 @dp.message_handler(state=BookParkingSpot.waiting_for_time_selection)
 async def process_book_time(message: types.Message, state: FSMContext):
     try:
-        time_range = message.text
+        time_range = message.text.strip()
         start_str, end_str = time_range.split('-')
         start_time = datetime.strptime(start_str.strip(), "%H.%M").time()
         end_time = datetime.strptime(end_str.strip(), "%H.%M").time()
@@ -327,8 +391,11 @@ async def process_book_time(message: types.Message, state: FSMContext):
             reply_markup=markup
         )
         await BookParkingSpot.waiting_for_confirmation.set()
-    except:
-        await message.answer("❌ Неверный формат времени. Используйте ЧЧ.ММ-ЧЧ.ММ")
+    except ValueError:
+        await message.answer("❌ Неверный формат времени. Используйте ЧЧ.ММ-ЧЧ.ММ (например: 14.00-16.00)")
+    except Exception as e:
+        logging.error(f"Ошибка: {e}")
+        await message.answer("❌ Произошла ошибка. Попробуйте еще раз.")
 
 @dp.callback_query_handler(lambda c: c.data == 'confirm_booking', state=BookParkingSpot.waiting_for_confirmation)
 async def confirm_booking(callback_query: types.CallbackQuery, state: FSMContext):
@@ -346,15 +413,18 @@ async def confirm_booking(callback_query: types.CallbackQuery, state: FSMContext
     
     if booking_id:
         # Уведомление админу
-        await bot.send_message(
-            ADMIN_CHAT_ID,
-            f"📅 НОВАЯ БРОНЬ!\n\n"
-            f"👤 Пользователь: @{callback_query.from_user.username}\n"
-            f"📍 Место: {user_data['spot_number']}\n"
-            f"📅 Дата: {format_date(user_data['selected_date'])}\n"
-            f"🕐 Время: {user_data['time_range']}\n"
-            f"💰 Сумма: {user_data['total_price']:.2f} руб."
-        )
+        try:
+            await bot.send_message(
+                ADMIN_CHAT_ID,
+                f"📅 НОВАЯ БРОНЬ!\n\n"
+                f"👤 Пользователь: @{callback_query.from_user.username}\n"
+                f"📍 Место: {user_data['spot_number']}\n"
+                f"📅 Дата: {format_date(user_data['selected_date'])}\n"
+                f"🕐 Время: {user_data['time_range']}\n"
+                f"💰 Сумма: {user_data['total_price']:.2f} руб."
+            )
+        except Exception as e:
+            logging.error(f"Не удалось отправить уведомление админу: {e}")
         
         await bot.send_message(
             callback_query.from_user.id,
@@ -381,6 +451,11 @@ async def cancel_booking(callback_query: types.CallbackQuery, state: FSMContext)
 # Мои места
 @dp.message_handler(lambda message: message.text == "📊 Мои места")
 async def cmd_my_spots(message: types.Message):
+    # Проверяем, зарегистрирован ли пользователь
+    if not db.check_user_exists(message.from_user.id):
+        await message.answer("⚠️ Сначала зарегистрируйтесь через /start")
+        return
+    
     spots = db.get_user_spots(message.from_user.id)
     
     if not spots:
@@ -402,6 +477,11 @@ async def cmd_my_spots(message: types.Message):
 # Мои бронирования
 @dp.message_handler(lambda message: message.text == "📋 Мои бронирования")
 async def cmd_my_bookings(message: types.Message):
+    # Проверяем, зарегистрирован ли пользователь
+    if not db.check_user_exists(message.from_user.id):
+        await message.answer("⚠️ Сначала зарегистрируйтесь через /start")
+        return
+    
     bookings = db.get_user_bookings(message.from_user.id)
     
     if not bookings:
@@ -441,7 +521,8 @@ async def process_admin_password(message: types.Message, state: FSMContext):
         await message.answer("✅ Доступ к админ-панели предоставлен!", reply_markup=markup)
     else:
         await message.answer("❌ Неверный пароль!")
-        await state.finish()
+    
+    await state.finish()
 
 # Админ функции
 @dp.message_handler(lambda message: message.text == "👥 Все пользователи")
@@ -450,7 +531,6 @@ async def admin_all_users(message: types.Message):
         await message.answer("⛔ У вас нет доступа!")
         return
     
-    # Простая заглушка - можно расширить
     await message.answer("Функция просмотра всех пользователей будет реализована позже.")
 
 @dp.message_handler(lambda message: message.text == "🅿️ Все места")
@@ -480,10 +560,7 @@ async def admin_statistics(message: types.Message):
 # Главное меню
 @dp.message_handler(lambda message: message.text == "🔙 Главное меню")
 async def cmd_main_menu(message: types.Message):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add("🚗 Добавить парковочное место", "📅 Забронировать место")
-    markup.add("📊 Мои места", "📋 Мои бронирования")
-    await message.answer("🏠 Главное меню", reply_markup=markup)
+    await show_main_menu(message)
 
 # Обработчик ошибок
 @dp.errors_handler()
