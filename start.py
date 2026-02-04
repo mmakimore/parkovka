@@ -6,7 +6,7 @@ import logging
 from datetime import datetime
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandStart, CommandObject  # Добавьте CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
@@ -257,15 +257,20 @@ async def process_car_info(message: Message, state: FSMContext):
             full_name=user_data['full_name'],
             phone=user_data['phone'],
             username=user_data.get('username'),
-            email=user_data.get('email'),
-            car_brand=car_brand,
-            car_model=car_model,
-            car_plate=car_plate
+            email=user_data.get('email')
         )
         
         if user_id:
+            # Обновляем информацию об автомобиле, если есть
+            if car_plate:
+                db.update_user(user_id, car_plate=car_plate)
+            if car_brand:
+                db.update_user(user_id, car_brand=car_brand)
+            if car_model:
+                db.update_user(user_id, car_model=car_model)
+            
             # Успешная регистрация
-            await complete_registration(message, state, user_id, user_data)
+            await complete_registration(message, state, user_id, user_data, car_plate, car_brand, car_model)
         else:
             await message.answer(
                 "❌ <b>Ошибка регистрации!</b>\n\n"
@@ -281,7 +286,7 @@ async def process_car_info(message: Message, state: FSMContext):
             reply_markup=kb_main.get_back_keyboard()
         )
 
-async def complete_registration(message: Message, state: FSMContext, user_id: int, user_data: dict):
+async def complete_registration(message: Message, state: FSMContext, user_id: int, user_data: dict, car_plate=None, car_brand=None, car_model=None):
     """Завершение регистрации"""
     try:
         # Получаем полную информацию о пользователе
@@ -298,13 +303,13 @@ async def complete_registration(message: Message, state: FSMContext, user_id: in
         if user['email']:
             success_text += f"📧 Email: {user['email']}\n"
         
-        if user['car_plate']:
-            car_info = user['car_plate']
-            if user['car_brand']:
-                car_info = f"{user['car_brand']}"
-                if user['car_model']:
-                    car_info += f" {user['car_model']}"
-                car_info += f" ({user['car_plate']})"
+        if car_plate:
+            car_info = car_plate
+            if car_brand:
+                car_info = f"{car_brand}"
+                if car_model:
+                    car_info += f" {car_model}"
+                car_info += f" ({car_plate})"
             success_text += f"🚗 Автомобиль: {car_info}\n"
         
         success_text += (
@@ -434,7 +439,7 @@ async def show_main_menu(message: Message = None):
 # ==================== КОМАНДА /ADMIN ====================
 
 @router.message(Command("admin"))
-async def cmd_admin(message: Message, state: FSMContext):
+async def cmd_admin(message: Message, state: FSMContext, command: CommandObject):
     """Вход в админ-панель по паролю"""
     try:
         user_id = message.from_user.id
@@ -469,7 +474,13 @@ async def cmd_admin(message: Message, state: FSMContext):
             )
             return
         
-        # Запрашиваем пароль
+        # Проверяем, есть ли пароль в аргументах команды
+        if command.args and command.args.strip():
+            password = command.args.strip()
+            await process_admin_password_with_args(message, state, user, password)
+            return
+        
+        # Если пароля нет в аргументах, запрашиваем его
         await message.answer(
             "🔐 <b>Вход в админ-панель</b>\n\n"
             "Введите пароль для доступа к админ-панели:\n\n"
@@ -489,11 +500,68 @@ async def cmd_admin(message: Message, state: FSMContext):
             reply_markup=kb_main.get_main_menu()
         )
 
-# ==================== ОБРАБОТКА ПАРОЛЯ ====================
+async def process_admin_password_with_args(message: Message, state: FSMContext, user: dict, password: str):
+    """Обработка пароля из аргументов команды /admin"""
+    try:
+        # Проверяем пароль
+        if db.check_admin_password(password):
+            # Создаем админ-сессию на 24 часа
+            session_token = db.create_admin_session(user['id'], expires_hours=24)
+            
+            if session_token:
+                await message.answer(
+                    f"✅ <b>Доступ к админ-панели предоставлен!</b>\n\n"
+                    f"Теперь у вас есть доступ к админ-панели на 24 часа.\n\n"
+                    f"Используйте кнопку '⚙️ Админ-панель' в главном меню для управления системой.",
+                    reply_markup=kb_main.get_main_menu(telegram_id=message.from_user.id, db_instance=db)
+                )
+                
+                # Логируем вход
+                log_user_action(user['id'], "admin_login", f"Вход в админ-панель по паролю (аргументы)")
+                
+                # Уведомляем постоянных админов
+                admins = db.get_all_users(is_admin=True)
+                for admin in admins:
+                    if admin['telegram_id'] != message.from_user.id:
+                        await notify_user(
+                            admin['telegram_id'],
+                            "📢 Вход в админ-панель",
+                            f"Пользователь {user['full_name']} вошел в админ-панель по паролю.\n"
+                            f"ID: {user['telegram_id']}\n"
+                            f"Время: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}",
+                            "admin_login_notification"
+                        )
+            else:
+                await message.answer(
+                    "❌ <b>Ошибка создания сессии!</b>\n\n"
+                    "Попробуйте позже или обратитесь к администратору.",
+                    reply_markup=kb_main.get_main_menu()
+                )
+        else:
+            # Неверный пароль, запрашиваем снова
+            await message.answer(
+                "❌ <b>Неверный пароль!</b>\n\n"
+                "Попробуйте снова или обратитесь к администратору.\n\n"
+                "Введите пароль:",
+                reply_markup=kb_main.get_cancel_keyboard()
+            )
+            
+            # Сохраняем ID пользователя и переходим в состояние ожидания пароля
+            await state.update_data(admin_auth_user_id=user['id'])
+            await state.set_state(AdminAuthStates.waiting_for_password)
+            
+    except Exception as e:
+        logger.error(f"Ошибка обработки пароля из аргументов: {e}")
+        await message.answer(
+            "❌ Произошла ошибка. Попробуйте позже.",
+            reply_markup=kb_main.get_main_menu()
+        )
+
+# ==================== ОБРАБОТКА ПАРОЛЯ (отдельное сообщение) ====================
 
 @router.message(AdminAuthStates.waiting_for_password)
 async def process_admin_password(message: Message, state: FSMContext):
-    """Обработка пароля для входа в админку"""
+    """Обработка пароля для входа в админку (отдельное сообщение)"""
     try:
         password = message.text.strip()
         data = await state.get_data()
@@ -502,6 +570,15 @@ async def process_admin_password(message: Message, state: FSMContext):
         if not user_id:
             await message.answer(
                 "❌ Ошибка авторизации. Попробуйте снова.",
+                reply_markup=kb_main.get_main_menu()
+            )
+            await state.clear()
+            return
+        
+        user = db.get_user(user_id=user_id)
+        if not user:
+            await message.answer(
+                "❌ Пользователь не найден.",
                 reply_markup=kb_main.get_main_menu()
             )
             await state.clear()
@@ -521,7 +598,6 @@ async def process_admin_password(message: Message, state: FSMContext):
                 )
                 
                 # Логируем вход
-                user = db.get_user(user_id=user_id)
                 log_user_action(user_id, "admin_login", f"Вход в админ-панель по паролю")
                 
                 # Уведомляем постоянных админов
