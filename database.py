@@ -2,7 +2,6 @@ import sqlite3
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Tuple
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -112,17 +111,6 @@ class Database:
                 FOREIGN KEY (user_id) REFERENCES users(user_id),
                 FOREIGN KEY (spot_id) REFERENCES parking_spots(id)
             )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS free_slots_cache (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                spot_id INTEGER NOT NULL,
-                start_datetime DATETIME NOT NULL,
-                end_datetime DATETIME NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(spot_id, start_datetime, end_datetime),
-                FOREIGN KEY (spot_id) REFERENCES parking_spots(id)
-            )
             """
         ]
         
@@ -131,7 +119,6 @@ class Database:
             for query in queries:
                 cursor.execute(query)
             
-            # Создание индексов для ускорения запросов
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_periods_datetime 
                 ON availability_periods(start_datetime, end_datetime, is_booked)
@@ -156,10 +143,6 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_availability_notifications 
                 ON availability_notifications(user_id, is_active)
             """)
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_free_slots_cache 
-                ON free_slots_cache(spot_id, start_datetime)
-            """)
             
             self.connection.commit()
             return True
@@ -167,7 +150,6 @@ class Database:
             logger.error(f"Ошибка создания таблиц: {e}")
             return False
     
-    # ============ USER METHODS ============
     def add_user(self, user_id, username, first_name, phone):
         try:
             cursor = self.connection.cursor()
@@ -220,7 +202,6 @@ class Database:
             logger.error(f"Ошибка назначения администратора: {e}")
             return False
     
-    # ============ PARKING SPOT METHODS ============
     def add_parking_spot(self, owner_id, spot_number, price_per_hour, price_per_day):
         try:
             cursor = self.connection.cursor()
@@ -273,7 +254,6 @@ class Database:
             return []
     
     def get_all_active_spots(self):
-        """Получает все активные места с информацией о владельцах"""
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
@@ -289,9 +269,7 @@ class Database:
             logger.error(f"Ошибка получения всех активных мест: {e}")
             return []
     
-    # ============ AVAILABILITY PERIODS METHODS ============
     def add_availability_period(self, spot_id, start_datetime, end_datetime):
-        """Добавляет период доступности"""
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
@@ -304,52 +282,7 @@ class Database:
             logger.error(f"Ошибка добавления периода доступности: {e}")
             return None
     
-    def check_period_availability(self, spot_id, start_datetime, end_datetime):
-        """Проверяет, свободен ли период"""
-        try:
-            cursor = self.connection.cursor()
-            cursor.execute("""
-                SELECT COUNT(*) as count 
-                FROM availability_periods
-                WHERE spot_id = ? 
-                  AND is_booked = 0
-                  AND NOT (end_datetime <= ? OR start_datetime >= ?)
-            """, (spot_id, start_datetime, end_datetime))
-            
-            result = cursor.fetchone()
-            return result['count'] == 0 if result else False
-        except Exception as e:
-            logger.error(f"Ошибка проверки доступности периода: {e}")
-            return False
-    
-    def get_available_periods_for_spot(self, spot_id, start_date=None, end_date=None):
-        """Получает все свободные периоды для места"""
-        try:
-            cursor = self.connection.cursor()
-            
-            if start_date and end_date:
-                cursor.execute("""
-                    SELECT * FROM availability_periods
-                    WHERE spot_id = ? 
-                      AND is_booked = 0
-                      AND NOT (end_datetime <= ? OR start_datetime >= ?)
-                    ORDER BY start_datetime
-                """, (spot_id, start_date, end_date))
-            else:
-                cursor.execute("""
-                    SELECT * FROM availability_periods
-                    WHERE spot_id = ? AND is_booked = 0
-                    ORDER BY start_datetime
-                """, (spot_id,))
-            
-            rows = cursor.fetchall()
-            return [dict(row) for row in rows]
-        except Exception as e:
-            logger.error(f"Ошибка получения периодов для места: {e}")
-            return []
-    
     def get_available_spots_by_date_range(self, start_datetime, end_datetime):
-        """Получает все места, доступные в указанный период времени"""
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
@@ -373,7 +306,6 @@ class Database:
             return []
     
     def find_available_periods(self, spot_id, start_datetime, end_datetime):
-        """Находит подходящие свободные периоды для бронирования"""
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
@@ -392,7 +324,6 @@ class Database:
             return []
     
     def get_next_available_periods(self, days_ahead=7, limit=20):
-        """Получает ближайшие свободные периоды на несколько дней вперед"""
         try:
             cursor = self.connection.cursor()
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -418,35 +349,10 @@ class Database:
             logger.error(f"Ошибка получения ближайших периодов: {e}")
             return []
     
-    def get_free_periods_by_spot(self, spot_id, days_ahead=7):
-        """Получает свободные периоды для конкретного места"""
-        try:
-            cursor = self.connection.cursor()
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            future_date = (datetime.now() + timedelta(days=days_ahead)).strftime("%Y-%m-%d %H:%M:%S")
-            
-            cursor.execute("""
-                SELECT * FROM availability_periods
-                WHERE spot_id = ? 
-                  AND is_booked = 0
-                  AND start_datetime >= ?
-                  AND start_datetime <= ?
-                ORDER BY start_datetime
-            """, (spot_id, now, future_date))
-            
-            rows = cursor.fetchall()
-            return [dict(row) for row in rows]
-        except Exception as e:
-            logger.error(f"Ошибка получения свободных периодов места: {e}")
-            return []
-    
-    # ============ BOOKING METHODS ============
     def create_booking(self, user_id, spot_id, period_id, start_datetime, end_datetime, total_price):
-        """Создает бронирование"""
         try:
             cursor = self.connection.cursor()
             
-            # Проверяем, что период все еще свободен
             cursor.execute("""
                 SELECT id FROM availability_periods
                 WHERE id = ? AND is_booked = 0
@@ -456,7 +362,6 @@ class Database:
             if not period:
                 return None
             
-            # Создаем бронирование
             cursor.execute("""
                 INSERT INTO bookings (user_id, spot_id, period_id, start_datetime, end_datetime, total_price)
                 VALUES (?, ?, ?, ?, ?, ?)
@@ -464,14 +369,12 @@ class Database:
             
             booking_id = cursor.lastrowid
             
-            # Помечаем период как занятый
             cursor.execute("""
                 UPDATE availability_periods 
                 SET is_booked = 1, booked_by = ?, booked_at = CURRENT_TIMESTAMP
                 WHERE id = ?
             """, (user_id, period_id))
             
-            # Проверяем подписки на уведомления
             cursor.execute("""
                 SELECT an.*, u.user_id as subscriber_id
                 FROM availability_notifications an
@@ -486,7 +389,6 @@ class Database:
             
             notifications = cursor.fetchall()
             
-            # Деактивируем найденные подписки
             for notification in notifications:
                 cursor.execute("""
                     UPDATE availability_notifications 
@@ -494,7 +396,6 @@ class Database:
                     WHERE id = ?
                 """, (notification['id'],))
                 
-                # Добавляем уведомление пользователю
                 spot_info = self.get_parking_spot(spot_id)
                 if spot_info:
                     notification_text = (
@@ -547,40 +448,6 @@ class Database:
             logger.error(f"Ошибка получения бронирований пользователя: {e}")
             return []
     
-    def cancel_booking(self, booking_id):
-        try:
-            cursor = self.connection.cursor()
-            
-            # Получаем информацию о бронировании
-            cursor.execute("""
-                SELECT period_id, spot_id, start_datetime, end_datetime 
-                FROM bookings WHERE id = ?
-            """, (booking_id,))
-            booking = cursor.fetchone()
-            
-            if not booking:
-                return False
-            
-            # Отменяем бронирование
-            cursor.execute("""
-                UPDATE bookings SET status = 'cancelled' WHERE id = ?
-            """, (booking_id,))
-            
-            # Освобождаем период
-            cursor.execute("""
-                UPDATE availability_periods 
-                SET is_booked = 0, booked_by = NULL, booked_at = NULL
-                WHERE id = ?
-            """, (booking['period_id'],))
-            
-            self.connection.commit()
-            return True
-        except Exception as e:
-            logger.error(f"Ошибка отмены бронирования: {e}")
-            self.connection.rollback()
-            return False
-    
-    # ============ NOTIFICATION METHODS ============
     def add_notification(self, user_id, message):
         try:
             cursor = self.connection.cursor()
@@ -621,9 +488,7 @@ class Database:
             logger.error(f"Ошибка пометки уведомлений как прочитанных: {e}")
             return False
     
-    # ============ AVAILABILITY NOTIFICATIONS ============
     def add_availability_notification(self, user_id, spot_id, start_datetime, end_datetime):
-        """Добавляет подписку на уведомление о свободном месте"""
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
@@ -637,7 +502,6 @@ class Database:
             return None
     
     def get_user_notifications(self, user_id):
-        """Получает подписки пользователя на уведомления"""
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
@@ -654,7 +518,6 @@ class Database:
             return []
     
     def remove_notification(self, notification_id):
-        """Удаляет подписку на уведомление"""
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
@@ -666,45 +529,6 @@ class Database:
             logger.error(f"Ошибка удаления подписки: {e}")
             return False
     
-    # ============ FREE SLOTS CACHE ============
-    def cache_free_slots(self, spot_id, start_datetime, end_datetime):
-        """Кэширует информацию о свободных слотах"""
-        try:
-            cursor = self.connection.cursor()
-            cursor.execute("""
-                INSERT OR REPLACE INTO free_slots_cache (spot_id, start_datetime, end_datetime)
-                VALUES (?, ?, ?)
-            """, (spot_id, start_datetime, end_datetime))
-            self.connection.commit()
-            return True
-        except Exception as e:
-            logger.error(f"Ошибка кэширования слотов: {e}")
-            return False
-    
-    def get_cached_free_slots(self, days_ahead=7):
-        """Получает кэшированные свободные слоты"""
-        try:
-            cursor = self.connection.cursor()
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            future_date = (datetime.now() + timedelta(days=days_ahead)).strftime("%Y-%m-%d %H:%M:%S")
-            
-            cursor.execute("""
-                SELECT fsc.*, ps.spot_number, ps.price_per_hour, ps.price_per_day,
-                       u.username, u.first_name
-                FROM free_slots_cache fsc
-                JOIN parking_spots ps ON fsc.spot_id = ps.id
-                LEFT JOIN users u ON ps.owner_id = u.user_id
-                WHERE fsc.start_datetime >= ? AND fsc.start_datetime <= ?
-                ORDER BY fsc.start_datetime
-            """, (now, future_date))
-            
-            rows = cursor.fetchall()
-            return [dict(row) for row in rows]
-        except Exception as e:
-            logger.error(f"Ошибка получения кэшированных слотов: {e}")
-            return []
-    
-    # ============ ADMIN METHODS ============
     def get_all_users(self):
         try:
             cursor = self.connection.cursor()
