@@ -1,0 +1,13 @@
+aiogram==3.10.0
+python-dotenv==1.0.0
+sqlite3
+
+# Для разработки
+pytest==8.0.0
+pytest-asyncio==0.23.0
+black==24.1.1
+flake8==7.0.0
+
+# Для дополнительных функций (опционально)
+requests==2.31.0
+pytz==2023.3
