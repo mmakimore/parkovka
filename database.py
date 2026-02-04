@@ -2,7 +2,6 @@ import sqlite3
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
-import json
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -13,6 +12,7 @@ class Database:
         self.db_path = self.get_db_path()
         self.connect()
         self.create_tables()
+        self.create_admin()
     
     def get_db_path(self):
         data_dir = Path("/data")
@@ -31,6 +31,27 @@ class Database:
             return True
         except Exception as e:
             logger.error(f"Ошибка подключения: {e}")
+            return False
+    
+    def create_admin(self):
+        """Создаем администратора при первом запуске"""
+        try:
+            cursor = self.connection.cursor()
+            # ID админа из конфига
+            cursor.execute("SELECT is_admin FROM users WHERE user_id = ?", (7884533080,))
+            admin = cursor.fetchone()
+            
+            if not admin:
+                cursor.execute("""
+                    INSERT OR REPLACE INTO users 
+                    (user_id, username, first_name, phone, is_admin) 
+                    VALUES (?, ?, ?, ?, ?)
+                """, (7884533080, "admin", "Администратор", "+79990000000", 1))
+                self.connection.commit()
+                logger.info("Администратор создан")
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка создания админа: {e}")
             return False
     
     def create_tables(self):
@@ -138,6 +159,10 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_bookings_user 
                 ON bookings(user_id)
             """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_spots_owner 
+                ON parking_spots(owner_id, is_active)
+            """)
             
             self.connection.commit()
             logger.info("Все таблицы созданы/проверены")
@@ -160,18 +185,6 @@ class Database:
             return True
         except Exception as e:
             logger.error(f"Ошибка добавления пользователя: {e}")
-            return False
-    
-    def update_user(self, user_id, **kwargs):
-        try:
-            cursor = self.connection.cursor()
-            set_clause = ", ".join([f"{k} = ?" for k in kwargs.keys()])
-            values = list(kwargs.values()) + [user_id]
-            cursor.execute(f"UPDATE users SET {set_clause} WHERE user_id = ?", values)
-            self.connection.commit()
-            return True
-        except Exception as e:
-            logger.error(f"Ошибка обновления пользователя: {e}")
             return False
     
     def get_user(self, user_id):
@@ -239,8 +252,8 @@ class Database:
             """, (owner_id, spot_number, price_per_hour, price_per_day))
             self.connection.commit()
             return cursor.lastrowid
-        except sqlite3.IntegrityError:
-            logger.error(f"Место {spot_number} уже существует у пользователя {owner_id}")
+        except sqlite3.IntegrityError as e:
+            logger.error(f"Место уже существует: {e}")
             return None
         except Exception as e:
             logger.error(f"Ошибка добавления парковочного места: {e}")
@@ -253,7 +266,7 @@ class Database:
                 SELECT ps.*, u.username, u.first_name, u.phone, u.card_number, u.bank
                 FROM parking_spots ps
                 LEFT JOIN users u ON ps.owner_id = u.user_id
-                WHERE ps.id = ?
+                WHERE ps.id = ? AND ps.is_active = 1
             """, (spot_id,))
             row = cursor.fetchone()
             return dict(row) if row else None
@@ -270,7 +283,9 @@ class Database:
                        (SELECT COUNT(*) FROM availability_periods ap 
                         WHERE ap.spot_id = ps.id AND ap.is_booked = 0) as available_periods,
                        (SELECT COUNT(*) FROM availability_periods ap 
-                        WHERE ap.spot_id = ps.id AND ap.is_booked = 1) as booked_periods
+                        WHERE ap.spot_id = ps.id AND ap.is_booked = 1) as booked_periods,
+                       (SELECT COUNT(*) FROM bookings b 
+                        WHERE b.spot_id = ps.id AND b.status = 'active') as active_bookings
                 FROM parking_spots ps
                 LEFT JOIN users u ON ps.owner_id = u.user_id
                 WHERE ps.is_active = 1
@@ -282,6 +297,26 @@ class Database:
             logger.error(f"Ошибка получения всех мест: {e}")
             return []
     
+    def get_user_spots(self, owner_id):
+        """Получить места пользователя"""
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                SELECT ps.*, 
+                       COUNT(DISTINCT ap.id) as total_periods,
+                       SUM(CASE WHEN ap.is_booked = 1 THEN 1 ELSE 0 END) as booked_periods
+                FROM parking_spots ps
+                LEFT JOIN availability_periods ap ON ps.id = ap.spot_id
+                WHERE ps.owner_id = ? AND ps.is_active = 1
+                GROUP BY ps.id
+                ORDER BY ps.spot_number
+            """, (owner_id,))
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"Ошибка получения мест пользователя: {e}")
+            return []
+    
     def get_available_spots_for_guest(self):
         """Получить места для гостей (без деталей владельцев)"""
         try:
@@ -289,9 +324,7 @@ class Database:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
             cursor.execute("""
-                SELECT DISTINCT ps.id, ps.spot_number, ps.price_per_hour, ps.price_per_day,
-                       MIN(ap.start_datetime) as nearest_start,
-                       MAX(ap.end_datetime) as farthest_end
+                SELECT DISTINCT ps.id, ps.spot_number, ps.price_per_hour, ps.price_per_day
                 FROM parking_spots ps
                 JOIN availability_periods ap ON ps.id = ap.spot_id
                 WHERE ps.is_active = 1 
@@ -305,13 +338,12 @@ class Database:
             spots = []
             for row in rows:
                 spot = dict(row)
-                # Получаем ближайшие 3 свободных периода для этого места
+                # Получаем периоды для этого места
                 cursor.execute("""
                     SELECT start_datetime, end_datetime 
                     FROM availability_periods 
                     WHERE spot_id = ? AND is_booked = 0 AND end_datetime > ?
                     ORDER BY start_datetime
-                    LIMIT 3
                 """, (spot['id'], now))
                 periods = cursor.fetchall()
                 spot['periods'] = [dict(p) for p in periods]
@@ -323,19 +355,21 @@ class Database:
             return []
     
     def get_available_spots_by_date_range(self, start_datetime, end_datetime):
+        """Получить доступные места по диапазону дат"""
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
-                SELECT DISTINCT ps.*, u.username, u.first_name, u.card_number, u.bank,
-                       ap.start_datetime as period_start, ap.end_datetime as period_end
+                SELECT DISTINCT ps.*, u.username, u.first_name, u.card_number, u.bank
                 FROM parking_spots ps
                 LEFT JOIN users u ON ps.owner_id = u.user_id
-                LEFT JOIN availability_periods ap ON ps.id = ap.spot_id
-                WHERE ps.is_active = 1 
-                  AND ap.is_booked = 0
-                  AND ap.start_datetime <= ?
-                  AND ap.end_datetime >= ?
-                GROUP BY ps.id
+                WHERE ps.id IN (
+                    SELECT ap.spot_id 
+                    FROM availability_periods ap
+                    WHERE ap.is_booked = 0
+                      AND ap.start_datetime <= ?
+                      AND ap.end_datetime >= ?
+                )
+                AND ps.is_active = 1
                 ORDER BY ps.price_per_hour
             """, (end_datetime, start_datetime))
             
@@ -346,6 +380,7 @@ class Database:
             return []
     
     def find_available_periods(self, spot_id, start_datetime, end_datetime):
+        """Найти доступные периоды для места"""
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
@@ -364,6 +399,7 @@ class Database:
             return []
     
     def add_availability_period(self, spot_id, start_datetime, end_datetime):
+        """Добавить период доступности"""
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
@@ -376,8 +412,24 @@ class Database:
             logger.error(f"Ошибка добавления периода доступности: {e}")
             return None
     
+    def delete_spot(self, spot_id, owner_id):
+        """Удалить место"""
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                UPDATE parking_spots 
+                SET is_active = 0 
+                WHERE id = ? AND owner_id = ?
+            """, (spot_id, owner_id))
+            self.connection.commit()
+            return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Ошибка удаления места: {e}")
+            return False
+    
     # ============ БРОНИРОВАНИЯ ============
     def create_booking(self, user_id, spot_id, period_id, start_datetime, end_datetime, total_price):
+        """Создать бронирование"""
         try:
             cursor = self.connection.cursor()
             
@@ -414,12 +466,16 @@ class Database:
             return None
     
     def get_user_bookings(self, user_id):
+        """Получить бронирования пользователя"""
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
-                SELECT b.*, ps.spot_number, ps.price_per_hour
+                SELECT b.*, ps.spot_number, ps.price_per_hour,
+                       u.username as owner_username, u.first_name as owner_name,
+                       u.phone as owner_phone, u.card_number as owner_card, u.bank as owner_bank
                 FROM bookings b
                 JOIN parking_spots ps ON b.spot_id = ps.id
+                LEFT JOIN users u ON ps.owner_id = u.user_id
                 WHERE b.user_id = ? AND b.status = 'active'
                 ORDER BY b.start_datetime DESC
             """, (user_id,))
@@ -439,7 +495,8 @@ class Database:
                        u1.username as renter_username, u1.first_name as renter_name, 
                        u1.phone as renter_phone, u1.car_brand, u1.car_model, u1.car_plate,
                        u2.username as owner_username, u2.first_name as owner_name,
-                       u2.card_number as owner_card, u2.bank as owner_bank
+                       u2.card_number as owner_card, u2.bank as owner_bank,
+                       u2.phone as owner_phone
                 FROM bookings b
                 JOIN parking_spots ps ON b.spot_id = ps.id
                 JOIN users u1 ON b.user_id = u1.user_id
@@ -452,8 +509,48 @@ class Database:
             logger.error(f"Ошибка получения всех бронирований: {e}")
             return []
     
+    def cancel_booking(self, booking_id, user_id):
+        """Отменить бронирование"""
+        try:
+            cursor = self.connection.cursor()
+            
+            # Получаем данные бронирования
+            cursor.execute("""
+                SELECT b.*, ap.id as period_id
+                FROM bookings b
+                LEFT JOIN availability_periods ap ON b.period_id = ap.id
+                WHERE b.id = ? AND b.user_id = ?
+            """, (booking_id, user_id))
+            
+            booking = cursor.fetchone()
+            if not booking:
+                return False
+            
+            # Отменяем бронирование
+            cursor.execute("""
+                UPDATE bookings 
+                SET status = 'cancelled' 
+                WHERE id = ?
+            """, (booking_id,))
+            
+            # Освобождаем период
+            if booking['period_id']:
+                cursor.execute("""
+                    UPDATE availability_periods 
+                    SET is_booked = 0, booked_by = NULL, booked_at = NULL
+                    WHERE id = ?
+                """, (booking['period_id'],))
+            
+            self.connection.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка отмены бронирования: {e}")
+            self.connection.rollback()
+            return False
+    
     # ============ УВЕДОМЛЕНИЯ ============
     def add_notification(self, user_id, message):
+        """Добавить уведомление"""
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
@@ -466,7 +563,39 @@ class Database:
             logger.error(f"Ошибка добавления уведомления: {e}")
             return False
     
+    def get_unread_notifications(self, user_id):
+        """Получить непрочитанные уведомления"""
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                SELECT * FROM notifications
+                WHERE user_id = ? AND is_read = 0
+                ORDER BY created_at DESC
+                LIMIT 10
+            """, (user_id,))
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"Ошибка получения уведомлений: {e}")
+            return []
+    
+    def mark_notifications_as_read(self, user_id):
+        """Пометить уведомления как прочитанные"""
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                UPDATE notifications 
+                SET is_read = 1 
+                WHERE user_id = ? AND is_read = 0
+            """, (user_id,))
+            self.connection.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка пометки уведомлений: {e}")
+            return False
+    
     def add_availability_notification(self, user_id, spot_id, start_datetime, end_datetime):
+        """Добавить подписку на уведомление о доступности"""
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
@@ -476,10 +605,11 @@ class Database:
             self.connection.commit()
             return cursor.lastrowid
         except Exception as e:
-            logger.error(f"Ошибка добавления подписки на уведомление: {e}")
+            logger.error(f"Ошибка добавления подписки: {e}")
             return None
     
     def get_user_notifications(self, user_id):
+        """Получить подписки пользователя"""
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
@@ -492,14 +622,16 @@ class Database:
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
         except Exception as e:
-            logger.error(f"Ошибка получения подписок пользователя: {e}")
+            logger.error(f"Ошибка получения подписок: {e}")
             return []
     
     def remove_notification(self, notification_id):
+        """Удалить подписку"""
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
-                DELETE FROM availability_notifications WHERE id = ?
+                DELETE FROM availability_notifications 
+                WHERE id = ?
             """, (notification_id,))
             self.connection.commit()
             return True
@@ -509,6 +641,7 @@ class Database:
     
     # ============ СТАТИСТИКА ============
     def get_statistics(self):
+        """Получить статистику"""
         try:
             cursor = self.connection.cursor()
             stats = {}
@@ -519,11 +652,11 @@ class Database:
             cursor.execute("SELECT COUNT(*) as count FROM parking_spots WHERE is_active = 1")
             stats['active_spots'] = cursor.fetchone()['count']
             
-            cursor.execute("SELECT COUNT(*) as count FROM bookings")
-            stats['total_bookings'] = cursor.fetchone()['count']
-            
             cursor.execute("SELECT COUNT(*) as count FROM bookings WHERE status = 'active'")
             stats['active_bookings'] = cursor.fetchone()['count']
+            
+            cursor.execute("SELECT COUNT(*) as count FROM bookings")
+            stats['total_bookings'] = cursor.fetchone()['count']
             
             cursor.execute("SELECT SUM(total_price) as total FROM bookings WHERE status = 'active'")
             stats['total_income'] = cursor.fetchone()['total'] or 0
@@ -531,11 +664,15 @@ class Database:
             cursor.execute("SELECT COUNT(*) as count FROM availability_periods WHERE is_booked = 0")
             stats['available_periods'] = cursor.fetchone()['count']
             
+            cursor.execute("SELECT COUNT(*) as count FROM availability_periods WHERE is_booked = 1")
+            stats['booked_periods'] = cursor.fetchone()['count']
+            
             return stats
         except Exception as e:
             logger.error(f"Ошибка получения статистики: {e}")
             return {}
     
     def close(self):
+        """Закрыть соединение"""
         if self.connection:
             self.connection.close()
