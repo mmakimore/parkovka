@@ -1,3 +1,7 @@
+#!/usr/bin/env python3
+"""
+База данных для бота парковки
+"""
 import sqlite3
 import logging
 import json
@@ -1899,4 +1903,5 @@ class Database:
             logger.info("✅ Соединение с БД закрыто")
 
 # Глобальный экземпляр БД
+
 db = Database()
